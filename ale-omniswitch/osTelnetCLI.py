@@ -77,6 +77,9 @@ class OmniSwitchTelnetCLI:
                     self.switch.remove_route(cidr)
                 except:
                     writer.write("Usage: no ip static-route <CIDR>\r\n")   
+            elif command.startswith("ping "):
+                _, dst_ip = command.split(maxsplit=1)
+                self.switch.ping(dst_ip)                    
             elif command == "show vlan":
                 self.show_vlan(writer)                                                         
             elif command == "show mac-address-table":
@@ -113,6 +116,7 @@ class OmniSwitchTelnetCLI:
                 writer.write("  show l3 interfaces\r\n")
                 writer.write("  show topology\r\n")
                 writer.write("  show ospf routes\r\n")
+                writer.write("  ping <destination-ip>\r\n")                
                 writer.write("  exit\r\n")
             else:
                 writer.write(f"Unknown command: {command}\r\n")
