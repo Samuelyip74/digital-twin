@@ -1,13 +1,14 @@
 
 from typing import Dict, Optional, Tuple
-from omniswitch import OmniSwitch24, OmniSwitchTelnetCLI
+from omniswitch import OmniSwitch
+from osTelnetCLI import OmniSwitchTelnetCLI
 import telnetlib3
 import asyncio
 
 
 class NetworkLabCLI:
     def __init__(self):
-        self.switches: Dict[str, OmniSwitch24] = {}
+        self.switches: Dict[str, OmniSwitch] = {}
         self.telnet_ports = {}
         self.telnet_tasks = {}  
         self.base_port = 9000
@@ -16,7 +17,7 @@ class NetworkLabCLI:
         if name in self.switches:
             print(f"Node {name} already exists.")
         else:
-            sw = OmniSwitch24(name)
+            sw = OmniSwitch(name)
             self.switches[name] = sw
             print(f"Added switch node: {name}")
 

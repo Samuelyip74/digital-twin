@@ -2,12 +2,13 @@ import asyncio
 import telnetlib3
 import subprocess
 import platform
-from omniswitch import OmniSwitch24, OmniSwitchTelnetCLI
+from omniswitch import OmniSwitch
+from osTelnetCLI import OmniSwitchTelnetCLI
 
 
 # Telnet Shell handler
 async def shell(reader, writer):
-    switch = OmniSwitch24("sw1")
+    switch = OmniSwitch("sw1")
     cli = OmniSwitchTelnetCLI(switch)
     await cli.interact(reader, writer)
 
