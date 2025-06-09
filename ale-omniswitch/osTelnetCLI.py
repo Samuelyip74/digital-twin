@@ -1,12 +1,13 @@
+import re
+
 class OmniSwitchTelnetCLI:
     def __init__(self, switch):
         self.switch = switch
 
     async def interact(self, reader, writer):
         writer.write(f"Welcome to Digital Twin - {self.switch.name} AOS 8.x CLI. Type 'help' to begin.\r\n")
-
         while True:
-            writer.write("> ")
+            writer.write(f"{self.switch.name}> ")
             buffer = ""
 
             while True:
@@ -44,14 +45,40 @@ class OmniSwitchTelnetCLI:
                 writer.write("Timezone updated.\r\n")
             elif command.startswith("set contact "):
                 self.switch.set_system_contact(command.replace("set contact ", "", 1).strip())
-                writer.write("System contact updated.\r\n")     
+                writer.write("System contact updated.\r\n")  
+            elif command.startswith("vlan "):
+                vlan_ids, name = parse_vlan_command(command)
+                for vlan_id in vlan_ids:
+                    self.switch.vlan_manager.create_vlan(vlan_id, name)
+                if vlan_ids:
+                    writer.write(f"Created VLAN(s): {', '.join(map(str, vlan_ids))}")
+                    if name:
+                        writer.write(f" with name '{name}'\r\n")
+                    else:
+                        writer.write("\r\n")
+                else:
+                    writer.write("Invalid VLAN input.\r\n")            
+            elif command.startswith("no vlan "):
+                try:
+                    _, _, vlan_id = command.split()
+                    self.switch.vlan_manager.delete_vlan(vlan_id)
+                    writer.write("\r\n")
+                except:
+                    writer.write("Usage: vlan ,vlan-id> name <vlan-name>\r\n")                                     
             elif command.startswith("ip static-route "):
                 try:
                     _, _, cidr, _, next_hop = command.split()
                     self.switch.add_route(cidr, next_hop)
-                    writer.write(f"Command: ip static-route {cidr} gateway {next_hop}\r\n")
                 except:
-                    writer.write("Usage: ip static-route <CIDR> gateway <next-hop>\r\n")                       
+                    writer.write("Usage: ip static-route <CIDR> gateway <next-hop>\r\n")       
+            elif command.startswith("no ip static-route "):
+                try:
+                    _, _, _, cidr = command.split()
+                    self.switch.remove_route(cidr)
+                except:
+                    writer.write("Usage: no ip static-route <CIDR>\r\n")   
+            elif command == "show vlan":
+                self.show_vlan(writer)                                                         
             elif command == "show mac-address-table":
                 self.show_mac_table(writer)
             elif command == "show arp":
@@ -76,6 +103,7 @@ class OmniSwitchTelnetCLI:
                 self.show_ospf_routes(writer)
             elif command == "help":
                 writer.write("Available commands:\r\n")
+                writer.write("  show vlan\r\n")
                 writer.write("  show mac-address-table\r\n")
                 writer.write("  show arp\r\n")
                 writer.write("  show ip route\r\n")
@@ -147,4 +175,51 @@ class OmniSwitchTelnetCLI:
         else:
             writer.write("OSPF routing not available.\r\n")
 
+    def show_vlan(self, writer):
+        vlans = self.switch.vlan_manager.vlans
+        if not vlans:
+            writer.write("No VLANs configured.\r\n")
+            return
+        writer.write("VLAN ID    Name        Ports\r\n")
+        writer.write("-----------------------------\r\n")
+        for vlan_id in sorted(vlans):
+            vlan = vlans[vlan_id]
+            ports = ','.join(map(str, sorted(vlan.ports))) if vlan.ports else "-"
+            writer.write(f"{vlan_id:<10} {vlan.name:<10} {ports}\r\n")
 
+
+# Helper functions
+
+def parse_vlan_command(command: str) -> tuple[list[int], str]:
+    """
+    Parses commands like:
+      - vlan 22 name 22vlan
+      - vlan 1-5,7,10 name Users
+      - vlan 100
+    Returns: (list of VLAN IDs, optional name)
+    """
+    # Match "vlan" followed by VLAN IDs and optional "name <vlan-name>"
+    match = re.match(r"vlan\s+([\d,\-\s]+)(?:\s+name\s+(.+))?$", command.strip(), re.IGNORECASE)
+    if not match:
+        return [], ""
+
+    vlan_part = match.group(1).strip()
+    name = match.group(2).strip() if match.group(2) else ""
+
+    vlan_ids = set()
+
+    for part in vlan_part.split(","):
+        part = part.strip()
+        if "-" in part:
+            try:
+                start, end = map(int, part.split("-"))
+                vlan_ids.update(range(min(start, end), max(start, end) + 1))
+            except ValueError:
+                continue  # Ignore malformed range
+        else:
+            try:
+                vlan_ids.add(int(part))
+            except ValueError:
+                continue  # Ignore non-integer
+
+    return sorted(vlan_ids), name

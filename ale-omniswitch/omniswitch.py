@@ -55,10 +55,22 @@ class VLANManager:
     def __init__(self):
         self.vlans: Dict[int, VLAN] = {}
 
+    def show_vlan(self):
+        if not self.vlans:
+            print("No VLANs configured.")
+            return
+        print("VLAN ID    Name        Ports")
+        print("-----------------------------")
+        for vlan_id in sorted(self.vlans):
+            vlan = self.vlans[vlan_id]
+            ports = ','.join(map(str, sorted(vlan.ports))) if vlan.ports else "-"
+            print(f"{vlan_id:<10} {vlan.name:<10} {ports}")
+
+
     def create_vlan(self, vlan_id: int, name: str = ""):
         if vlan_id not in self.vlans:
             self.vlans[vlan_id] = VLAN(vlan_id, name)
-            print(f"[VLAN] Created {self.vlans[vlan_id]}")
+            
 
     def edit_vlan(self, vlan_id: int, name: str):
         if vlan_id in self.vlans:
@@ -113,7 +125,7 @@ class OSPFEngine:
 
 
 class OmniSwitch:
-    def __init__(self, name="OmniSwitch24", timezone="UTC", system_contact="not-set"):
+    def __init__(self, name="OmniSwitch", timezone="UTC", system_contact="not-set"):
         self.name = name
         self.timezone = timezone
         self.system_contact = system_contact
@@ -140,6 +152,13 @@ class OmniSwitch:
 
     def add_route(self, ip_cidr: str, next_hop: str):
         self.routing_table[ip_cidr] = (next_hop, "static")
+
+    def remove_route(self, ip_cidr: str):
+        if ip_cidr in self.routing_table:
+            del self.routing_table[ip_cidr]
+            print(f"Route {ip_cidr} removed.")
+        else:
+            print(f"Route {ip_cidr} not found.")
 
     def create_vlan_interface(self, vlan_id: int, ip_with_prefix: str):
         name = f"VLAN{vlan_id}"
@@ -174,7 +193,7 @@ class OmniSwitch:
         self.ports[port_id].mvrp_enabled = True
         self.mvrp_table[port_id] = set()
 
-    def mvrp_advertise(self, neighbor_switch: "OmniSwitch24", via_port_id: int):
+    def mvrp_advertise(self, neighbor_switch: "OmniSwitch", via_port_id: int):
         local_vlans = {p.vlan for p in self.ports.values() if p.mode == "access"}
         trunk_port = self.ports[via_port_id]
         if trunk_port.mode != "trunk" or not trunk_port.mvrp_enabled:
@@ -184,7 +203,7 @@ class OmniSwitch:
                 neighbor_switch.ports[via_port_id].allowed_vlans.add(vlan)
                 neighbor_switch.vlan_manager.assign_port(vlan, via_port_id)
 
-    def run_mvrp(self, switch_map: Dict[str, "OmniSwitch24"]):
+    def run_mvrp(self, switch_map: Dict[str, "OmniSwitch"]):
         for port_id, port in self.ports.items():
             if port.mvrp_enabled and port.mode == "trunk" and port.linked_node in switch_map:
                 self.mvrp_advertise(switch_map[port.linked_node], port_id)
