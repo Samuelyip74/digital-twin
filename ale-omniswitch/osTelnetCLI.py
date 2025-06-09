@@ -51,20 +51,20 @@ class OmniSwitchTelnetCLI:
                 for vlan_id in vlan_ids:
                     self.switch.vlan_manager.create_vlan(vlan_id, name)
                 if vlan_ids:
-                    writer.write(f"Created VLAN(s): {', '.join(map(str, vlan_ids))}")
                     if name:
-                        writer.write(f" with name '{name}'\r\n")
+                        writer.write("\r\n")
                     else:
                         writer.write("\r\n")
                 else:
-                    writer.write("Invalid VLAN input.\r\n")            
+                    writer.write("Invalid VLAN input.\r\n")  
             elif command.startswith("no vlan "):
-                try:
-                    _, _, vlan_id = command.split()
-                    self.switch.vlan_manager.delete_vlan(vlan_id)
-                    writer.write("\r\n")
-                except:
-                    writer.write("Usage: vlan ,vlan-id> name <vlan-name>\r\n")                                     
+                vlan_ids = parse_remove_vlan_command(command)
+                if vlan_ids:
+                    for vlan_id in vlan_ids:
+                        self.switch.vlan_manager.delete_vlan(vlan_id)
+                    writer.write("VLAN(s) removed.\r\n")
+                else:
+                    writer.write("Invalid VLAN input.\r\n")                             
             elif command.startswith("ip static-route "):
                 try:
                     _, _, cidr, _, next_hop = command.split()
@@ -223,3 +223,28 @@ def parse_vlan_command(command: str) -> tuple[list[int], str]:
                 continue  # Ignore non-integer
 
     return sorted(vlan_ids), name
+
+def parse_remove_vlan_command(command: str) -> list[int]:
+    """
+    Parses a command like:
+        'no vlan 1-3,5,7'
+    Returns:
+        [1, 2, 3, 5, 7]
+    """
+    try:
+        parts = command.strip().split()
+        if len(parts) < 3:
+            return []
+        vlan_part = " ".join(parts[2:]).replace(" ", "")
+        vlan_ids = []
+
+        for segment in vlan_part.split(','):
+            if '-' in segment:
+                start, end = map(int, segment.split('-'))
+                vlan_ids.extend(range(start, end + 1))
+            else:
+                vlan_ids.append(int(segment))
+        return vlan_ids
+    except Exception as e:
+        print(f"[Parser Error] {e}")
+        return []
