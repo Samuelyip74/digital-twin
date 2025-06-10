@@ -5,6 +5,9 @@ from osTelnetCLI import OmniSwitchTelnetCLI
 import telnetlib3
 import asyncio
 
+import matplotlib.pyplot as plt
+import networkx as nx
+import ipaddress
 
 class NetworkLabCLI:
     def __init__(self):
@@ -84,6 +87,55 @@ class NetworkLabCLI:
                         seen_links.add(link_key)
                         print(f"  {sw_name}:{port_id} <--> {port.linked_node}:{self.switches[port.linked_node].ports[port_id].port_id}")
 
+    def draw_topology(self):
+        G = nx.Graph()
+        edge_labels = {}
+        seen_links = set()
+
+        # Add nodes
+        for name in self.switches:
+            G.add_node(name)
+
+        # Add edges with port info and shared subnet
+        for name, switch in self.switches.items():
+            for port_id, port in switch.ports.items():
+                if port.linked_node:
+                    peer_name = port.linked_node
+                    peer_switch = self.switches[peer_name]
+
+                    # Find reciprocal port
+                    peer_port = next((pid for pid, p in peer_switch.ports.items() if p.linked_node == name), None)
+                    edge = tuple(sorted((name, peer_name)))
+
+                    if edge not in seen_links:
+                        seen_links.add(edge)
+
+                        # Try to find shared subnet
+                        subnets = []
+                        for iface1 in switch.l3_interfaces.values():
+                            for iface2 in peer_switch.l3_interfaces.values():
+                                net1 = ipaddress.ip_interface(iface1.ip_address).network
+                                net2 = ipaddress.ip_interface(iface2.ip_address).network
+                                if net1 == net2:
+                                    subnets.append(str(net1))
+
+                        port_label = f"{name}:{port_id} ↔ {peer_name}:{peer_port}" if peer_port is not None else f"{name}:{port_id}"
+                        label = port_label
+                        if subnets:
+                            label += f"\n{subnets[0]}"  # only show one
+
+                        G.add_edge(*edge)
+                        edge_labels[edge] = label
+
+        # Draw graph
+        pos = nx.spring_layout(G, seed=42)
+        nx.draw(G, pos, with_labels=True, node_size=1600, node_color='lightyellow', font_weight='bold', edge_color='gray')
+        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=9, label_pos=0.5)
+
+        plt.title("Network Topology with Port and Subnet Labels")
+        plt.tight_layout()
+        plt.show()
+
 
     async def run(self):
         print("Welcome to Network Lab CLI. Type 'help' for commands.")
@@ -129,7 +181,9 @@ class NetworkLabCLI:
                 _, _, name = cmd.split()
                 await self.start_telnet(name)
             elif cmd == "show topology":
-                self.show_topology()                
+                self.show_topology()     
+            elif cmd == "show graph":
+                self.draw_topology()                           
             else:
                 print(f"Unknown command: {cmd}")
 
@@ -156,8 +210,6 @@ class NetworkLabCLI:
         await self.start_telnet("sw1")
         await self.start_telnet("sw2")
         print("[Lab] Configuration loaded.")
-
-
 
 if __name__ == "__main__":
     async def main():
