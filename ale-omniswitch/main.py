@@ -194,21 +194,28 @@ class NetworkLabCLI:
         # Step 1: Add nodes
         self.add_node("sw1")
         self.add_node("sw2")
+        self.add_node("sw3")
 
         # Step 2: Link sw1:1 <--> sw2:1
         self.link("sw1", 1, "sw2", 1)
+        self.link("sw2", 2, "sw3", 1)
 
         # Step 3: Apply VLAN and IP config
         sw1 = self.switches["sw1"]
         sw2 = self.switches["sw2"]
+        sw3 = self.switches["sw3"]
 
         sw1.vlan_manager.create_vlan(1)
         sw1.create_vlan_interface(1, "10.1.1.1/24")
 
         sw2.vlan_manager.create_vlan(1)
         sw2.create_vlan_interface(1, "10.1.1.2/24")
+
+        sw3.vlan_manager.create_vlan(1)
+        sw3.create_vlan_interface(1, "10.1.1.3/24")        
         await self.start_telnet("sw1")
         await self.start_telnet("sw2")
+        await self.start_telnet("sw3")
         print("[Lab] Configuration loaded.")
 
 if __name__ == "__main__":
