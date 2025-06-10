@@ -302,7 +302,7 @@ class OmniSwitch:
         if route_type == "connected":
             dst_ip = packet.dst_ip
             if dst_ip not in self.arp_table:
-                print(f"{self.name}: No ARP entry for {dst_ip}, sending ARP broadcast")
+                # print(f"{self.name}: No ARP entry for {dst_ip}, sending ARP broadcast")
                 arp_request = Packet(
                     src_ip=packet.src_ip,
                     dst_ip=packet.dst_ip,
@@ -320,19 +320,19 @@ class OmniSwitch:
             dst_mac, port_id = self.arp_table[dst_ip]
             port = self.ports.get(port_id)
             if not port or port.status != "up":
-                print(f"{self.name}: Port {port_id} is down")
+                # print(f"{self.name}: Port {port_id} is down")
                 return False
 
             # Forward packet to destination
             packet.dst_mac = dst_mac
-            print(f"{self.name}: Forwarding to {dst_mac} on port {port_id}")
+            # print(f"{self.name}: Forwarding to {dst_mac} on port {port_id}")
             neighbor = self.graph.nodes[port.linked_node]["object"]
             return neighbor.receive_packet(packet, ttl - 1)
 
         # Step 3: If next-hop is another router (static/ospf)
         elif route_type in ("static", "ospf"):
             if next_hop not in self.arp_table:
-                print(f"{self.name}: No ARP for next-hop {next_hop}, sending ARP broadcast")
+                # print(f"{self.name}: No ARP for next-hop {next_hop}, sending ARP broadcast")
                 arp_request = Packet(
                     src_ip=packet.src_ip,
                     dst_ip=next_hop,
@@ -350,12 +350,12 @@ class OmniSwitch:
             next_mac, port_id = self.arp_table[next_hop]
             port = self.ports.get(port_id)
             if not port or port.status != "up":
-                print(f"{self.name}: Port {port_id} is down")
+                # print(f"{self.name}: Port {port_id} is down")
                 return False
 
             # Forward packet to next hop
             packet.dst_mac = next_mac
-            print(f"{self.name}: Forwarding to next-hop {next_hop} on port {port_id}")
+            # print(f"{self.name}: Forwarding to next-hop {next_hop} on port {port_id}")
             neighbor = self.graph.nodes[port.linked_node]["object"]
             return neighbor.receive_packet(packet, ttl - 1)
 
@@ -364,7 +364,7 @@ class OmniSwitch:
             return False
     
     def receive_packet(self, packet: Packet, ttl: int):
-        print(f"{self.name}: Received packet for {packet.dst_ip} from {packet.src_ip}")
+        # print(f"{self.name}: Received packet for {packet.dst_ip} from {packet.src_ip}")
 
         # Handle TTL expired
         if ttl <= 1:
@@ -382,7 +382,7 @@ class OmniSwitch:
                 if ipaddress.ip_address(packet.src_ip) in neighbor_ips:
                     self.arp_table[packet.src_ip] = (packet.src_mac, port_id)
                     self.mac_table[packet.src_mac] = port_id
-                    print(f"{self.name}: Learned ARP {packet.src_ip} → {packet.src_mac} via port {port_id}")
+                    # print(f"{self.name}: Learned ARP {packet.src_ip} → {packet.src_mac} via port {port_id}")
                     break
 
         # Step 1 : Handle ARP request
@@ -401,7 +401,7 @@ class OmniSwitch:
                             vlan_tag=packet.vlan_tag,
                             payload={"type": "arp-reply", "mac": iface.mac_address}
                         )
-                        print(f"{self.name}: Responding to ARP request for {target_ip}")
+                        # print(f"{self.name}: Responding to ARP request for {target_ip}")
                         
                         # Send it back out the port it came in on
                         for port_id, port in self.ports.items():
@@ -420,7 +420,7 @@ class OmniSwitch:
             if resolved_mac not in self.mac_table:
                 self.mac_table[resolved_mac] = -1
 
-            print(f"{self.name}: Learned ARP from reply: {packet.src_ip} → {resolved_mac}")
+            # print(f"{self.name}: Learned ARP from reply: {packet.src_ip} → {resolved_mac}")
             return True
 
         # Step 3: Check if this switch is the destination
@@ -433,7 +433,7 @@ class OmniSwitch:
             ptype = packet.payload.get("type")
 
             if ptype == "ping":
-                print(f"{self.name}: Received ping from {packet.src_ip}, replying...")
+                # print(f"{self.name}: Received ping from {packet.src_ip}, replying...")
                 reply = Packet(
                     src_ip=packet.dst_ip,
                     dst_ip=packet.src_ip,
@@ -445,7 +445,7 @@ class OmniSwitch:
                 return self.send_packet(reply, ttl=10)
 
             elif ptype == "ping-reply":
-                print(f"{self.name}: Received ping-reply from {packet.src_ip}")
+                # print(f"{self.name}: Received ping-reply from {packet.src_ip}")
                 self.ping_reply_received = True
                 return True
 
@@ -456,11 +456,11 @@ class OmniSwitch:
         return forwarded
  
 
-    def ping(self, dst_ip: str, count: int = 5, timeout: float = 1.0):
-        print(f"Pinging {dst_ip} from {self.name}...")
+    def ping(self, dst_ip: str, writer, count: int = 4, timeout: float = 1.0):
+        writer.write(f"Pinging {dst_ip} with 32 bytes of data:\r\n")
 
         if not self.l3_interfaces:
-            print("No L3 interface available to send ping from.")
+            writer.write("No L3 interface available to send ping from.\r\n")
             return
 
         source_iface = next(iter(self.l3_interfaces.values()))
@@ -468,35 +468,43 @@ class OmniSwitch:
         src_mac = source_iface.mac_address or "00:00:00:00:00:01"
 
         success_count = 0
+        rtt_list = []
 
         for seq in range(1, count + 1):
-            print(f"Sending ping {seq}...")
             self.ping_reply_received = False
-
             packet = Packet(
                 src_ip=src_ip,
                 dst_ip=dst_ip,
                 src_mac=src_mac,
-                dst_mac="ff:ff:ff:ff:ff:ff",  # Will be updated by ARP resolution
+                dst_mac="ff:ff:ff:ff:ff:ff",
                 payload={"type": "ping", "seq": seq}
             )
 
-            if not self.send_packet(packet, ttl=10):
-                print("Failed to send ping packet")
+            send_time = time.time()
+
+            if not self.send_packet(packet, ttl=118):
+                writer.write("Request could not be sent.\r\n")
                 continue
 
-            # Wait for reply
-            start_time = time.time()
-            while time.time() - start_time < timeout:
+            while time.time() - send_time < timeout:
                 if self.ping_reply_received:
+                    rtt = int((time.time() - send_time) * 1000)
+                    rtt_list.append(rtt)
+                    writer.write(f"Reply from {dst_ip}: bytes=32 time={rtt}ms TTL=118\r\n")
                     success_count += 1
-                    print(f"Reply from {dst_ip}: seq={seq}")
                     break
-                time.sleep(0.1)
+                time.sleep(0.05)
             else:
-                print(f"Request timeout for seq {seq}")
+                writer.write(f"Request timed out.\r\n")
 
-        print(f"\nPing statistics for {dst_ip}:")
-        print(f"    Packets: Sent = {count}, Received = {success_count}, Lost = {count - success_count}")
-        if count > 0:
-            print(f"    ({int((1 - success_count/count)*100)}% loss)")
+        # Statistics
+        lost = count - success_count
+        loss_percent = int((lost / count) * 100)
+
+        writer.write(f"\r\nPing statistics for {dst_ip}:\r\n")
+        writer.write(f"    Packets: Sent = {count}, Received = {success_count}, Lost = {lost} ({loss_percent}% loss),\r\n")
+
+        if rtt_list:
+            writer.write("Approximate round trip times in milli-seconds:\r\n")
+            writer.write(f"    Minimum = {min(rtt_list)}ms, Maximum = {max(rtt_list)}ms, Average = {sum(rtt_list)//len(rtt_list)}ms\r\n")
+

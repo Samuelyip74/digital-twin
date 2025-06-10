@@ -97,7 +97,7 @@ class OmniSwitchTelnetCLI:
                     writer.write("Usage: no ip static-route <CIDR>\r\n")   
             elif command.startswith("ping "):
                 _, dst_ip = command.split(maxsplit=1)
-                self.switch.ping(dst_ip)                    
+                self.switch.ping(dst_ip, writer)                 
             elif command == "show vlan":
                 self.show_vlan(writer)                                                         
             elif command == "show mac-address-table":
