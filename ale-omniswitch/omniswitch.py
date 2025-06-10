@@ -281,10 +281,13 @@ class OmniSwitch:
             print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
             return False
 
-        # Step 1: Find route
-        dst_ip = None
+        # Initialize variables
+        dst_mac = None
+        dst_port = None
         next_hop = None
-        route_type = None   
+        route_type = None
+
+        # Step 1: Find route
         for network, (hop, rtype) in self.routing_table.items():
             if ipaddress.ip_address(packet.dst_ip) in ipaddress.ip_network(network):
                 next_hop = hop
@@ -298,9 +301,8 @@ class OmniSwitch:
         # Step 2: If route is 'connected', treat dst_ip directly
         if route_type == "connected":
             dst_ip = packet.dst_ip
-            # ARP resolve for dst_ip
             if dst_ip not in self.arp_table:
-                print(f"{self.name}: No ARP entry for next-hop {dst_ip}, sending ARP broadcast")
+                print(f"{self.name}: No ARP entry for {dst_ip}, sending ARP broadcast")
                 arp_request = Packet(
                     src_ip=packet.src_ip,
                     dst_ip=packet.dst_ip,
@@ -308,43 +310,42 @@ class OmniSwitch:
                     dst_mac="ff:ff:ff:ff:ff:ff",
                     payload={"type": "arp-request", "target_ip": dst_ip}
                 )
+                # Send ARP request out all ports
                 for port in self.ports.values():
                     if port.status == "up" and port.linked_node:
                         neighbor = self.graph.nodes[port.linked_node]["object"]
                         neighbor.receive_packet(arp_request, ttl - 1)
                 return True
 
-            dst_mac, port_id = self.arp_table[packet.dst_ip]
+            dst_mac, port_id = self.arp_table[dst_ip]
             port = self.ports.get(port_id)
             if not port or port.status != "up":
                 print(f"{self.name}: Port {port_id} is down")
                 return False
 
-            # MAC resolution
-            if dst_mac in self.mac_table:
-                dst_port = self.mac_table[dst_mac]
-                dst_port_obj = self.ports.get(dst_port)
-                if dst_port_obj and dst_port_obj.status == "up" and dst_port_obj.linked_node:
-                    packet.dst_mac = dst_mac
-                    print(f"{self.name}: Forwarding to {dst_mac} on port {dst_port}")
-                    next_switch = self.graph.nodes[dst_port_obj.linked_node]["object"]
-                    return next_switch.receive_packet(packet, ttl - 1)
-                else:
-                    print(f"{self.name}: Destination port {dst_port} is down or unlinked")
-                    return False
-            else:
-                print(f"{self.name}: MAC {dst_mac} not in MAC table")
-                return False
+            # Forward packet to destination
+            packet.dst_mac = dst_mac
+            print(f"{self.name}: Forwarding to {dst_mac} on port {port_id}")
+            neighbor = self.graph.nodes[port.linked_node]["object"]
+            return neighbor.receive_packet(packet, ttl - 1)
 
         # Step 3: If next-hop is another router (static/ospf)
         elif route_type in ("static", "ospf"):
-            # ARP resolve for next-hop IP
             if next_hop not in self.arp_table:
                 print(f"{self.name}: No ARP for next-hop {next_hop}, sending ARP broadcast")
-                dummy_mac = "de:ad:be:ef:00:02"
-                self.arp_table[next_hop] = (dummy_mac, 2)
-                self.mac_table[dummy_mac] = 2
-                return self.send_packet(packet, ttl - 1)
+                arp_request = Packet(
+                    src_ip=packet.src_ip,
+                    dst_ip=next_hop,
+                    src_mac=packet.src_mac,
+                    dst_mac="ff:ff:ff:ff:ff:ff",
+                    payload={"type": "arp-request", "target_ip": next_hop}
+                )
+                # Send ARP request out all ports
+                for port in self.ports.values():
+                    if port.status == "up" and port.linked_node:
+                        neighbor = self.graph.nodes[port.linked_node]["object"]
+                        neighbor.receive_packet(arp_request, ttl - 1)
+                return True
 
             next_mac, port_id = self.arp_table[next_hop]
             port = self.ports.get(port_id)
@@ -352,26 +353,15 @@ class OmniSwitch:
                 print(f"{self.name}: Port {port_id} is down")
                 return False
 
-            # MAC table lookup
-            if next_mac in self.mac_table:
-                dst_port = self.mac_table[next_mac]
-                dst_port_obj = self.ports.get(dst_port)
-                if dst_port_obj and dst_port_obj.status == "up" and dst_port_obj.linked_node:
-                    packet.dst_mac = next_mac
-                    print(f"{self.name}: Forwarding to next-hop {next_hop} on port {dst_port}")
-                    next_switch = self.graph.nodes[dst_port_obj.linked_node]["object"]
-                    return next_switch.receive_packet(packet, ttl - 1)
-                else:
-                    print(f"{self.name}: Destination port {dst_port} is down or unlinked")
-                    return False
-            else:
-                print(f"{self.name}: MAC {next_mac} not in MAC table")
-                return False
+            # Forward packet to next hop
+            packet.dst_mac = next_mac
+            print(f"{self.name}: Forwarding to next-hop {next_hop} on port {port_id}")
+            neighbor = self.graph.nodes[port.linked_node]["object"]
+            return neighbor.receive_packet(packet, ttl - 1)
 
         else:
             print(f"{self.name}: Unsupported route type {route_type}")
             return False
-
     
     def receive_packet(self, packet: Packet, ttl: int):
         print(f"{self.name}: Received packet for {packet.dst_ip} from {packet.src_ip}")
@@ -396,12 +386,13 @@ class OmniSwitch:
                     break
 
         # Step 1 : Handle ARP request
+        # In the ARP request handling section of receive_packet():
         if packet.payload and isinstance(packet.payload, dict):
             if packet.payload.get("type") == "arp-request":
                 target_ip = packet.payload.get("target_ip")
                 for iface in self.l3_interfaces.values():
                     if ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(target_ip):
-                        # Send ARP reply
+                        # Create ARP reply
                         arp_reply = Packet(
                             src_ip=target_ip,
                             dst_ip=packet.src_ip,
@@ -411,14 +402,24 @@ class OmniSwitch:
                             payload={"type": "arp-reply", "mac": iface.mac_address}
                         )
                         print(f"{self.name}: Responding to ARP request for {target_ip}")
-                        return self.send_packet(arp_reply, ttl)
-                return True  # Drop if we don't own the target IP
+                        
+                        # Send it back out the port it came in on
+                        for port_id, port in self.ports.items():
+                            if port.status == "up" and port.linked_node:
+                                neighbor = self.graph.nodes[port.linked_node]["object"]
+                                if ipaddress.ip_address(packet.src_ip) in [ipaddress.ip_interface(niface.ip_address).ip for niface in neighbor.l3_interfaces.values()]:
+                                    return self.send_packet(arp_reply, ttl)
+                        return False
 
         # Step 2: Handle ARP replies
         if packet.payload and isinstance(packet.payload, dict) and packet.payload.get("type") == "arp-reply":
             resolved_mac = packet.payload["mac"]
-            self.arp_table[packet.src_ip] = (resolved_mac, -1)
-            self.mac_table[resolved_mac] = -1
+            # Don't overwrite with -1 — only update if not already learned
+            if packet.src_ip not in self.arp_table:
+                self.arp_table[packet.src_ip] = (resolved_mac, -1)
+            if resolved_mac not in self.mac_table:
+                self.mac_table[resolved_mac] = -1
+
             print(f"{self.name}: Learned ARP from reply: {packet.src_ip} → {resolved_mac}")
             return True
 
@@ -470,28 +471,32 @@ class OmniSwitch:
 
         for seq in range(1, count + 1):
             print(f"Sending ping {seq}...")
-
-            self.ping_reply_received = False  # Reset before each attempt
+            self.ping_reply_received = False
 
             packet = Packet(
                 src_ip=src_ip,
                 dst_ip=dst_ip,
                 src_mac=src_mac,
-                dst_mac="ff:ff:ff:ff:ff:ff",
+                dst_mac="ff:ff:ff:ff:ff:ff",  # Will be updated by ARP resolution
                 payload={"type": "ping", "seq": seq}
             )
 
-            self.send_packet(packet, ttl=10)
+            if not self.send_packet(packet, ttl=10):
+                print("Failed to send ping packet")
+                continue
 
+            # Wait for reply
             start_time = time.time()
             while time.time() - start_time < timeout:
                 if self.ping_reply_received:
-                    print(f"Reply from {dst_ip}: seq={seq} time={round((time.time()-start_time)*1000)}ms")
                     success_count += 1
-                    time.sleep(0.1)  # Polling interval
+                    print(f"Reply from {dst_ip}: seq={seq}")
                     break
+                time.sleep(0.1)
+            else:
+                print(f"Request timeout for seq {seq}")
 
-            if not self.ping_reply_received:
-                print(f"Request timeout for {dst_ip}")
-
-        print(f"Ping statistics: {success_count}/{count} received.")
+        print(f"\nPing statistics for {dst_ip}:")
+        print(f"    Packets: Sent = {count}, Received = {success_count}, Lost = {count - success_count}")
+        if count > 0:
+            print(f"    ({int((1 - success_count/count)*100)}% loss)")
