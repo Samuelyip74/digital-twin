@@ -64,7 +64,25 @@ class OmniSwitchTelnetCLI:
                         self.switch.vlan_manager.delete_vlan(vlan_id)
                     writer.write("VLAN(s) removed.\r\n")
                 else:
-                    writer.write("Invalid VLAN input.\r\n")                             
+                    writer.write("Invalid VLAN input.\r\n")    
+            elif command.startswith("ip interface vlan"):
+                # Parse: ip interface vlan1 address 10.1.1.1 mask 255.255.255.0 vlan 1
+                try:
+                    match = re.match(
+                        r"ip interface (\S+)\s+address\s+(\d+\.\d+\.\d+\.\d+)\s+mask\s+(\d+\.\d+\.\d+\.\d+)\s+vlan\s+(\d+)",
+                        command,
+                        re.IGNORECASE
+                    )
+                    if not match:
+                        writer.write("Invalid syntax. Usage: ip interface <name> address <ip> mask <mask> vlan <vlan-id>\r\n")
+                    else:
+                        iface_name, ip, mask, vlan_id = match.groups()
+                        vlan_id = int(vlan_id)
+                        prefix = sum([bin(int(octet)).count('1') for octet in mask.split('.')])  # Convert mask to CIDR prefix
+                        ip_with_prefix = f"{ip}/{prefix}"
+                        self.switch.create_vlan_interface(vlan_id, ip_with_prefix)
+                except Exception as e:
+                    writer.write(f"Error: {e}\r\n")                                            
             elif command.startswith("ip static-route "):
                 try:
                     _, _, cidr, _, next_hop = command.split()

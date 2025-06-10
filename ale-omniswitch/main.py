@@ -30,6 +30,10 @@ class NetworkLabCLI:
         s1.ports[port1].status = "up"
         s2.ports[port2].linked_node = sw1
         s2.ports[port2].status = "up"
+
+        # Add neighbor nodes to each other's graph with reference
+        s1.graph.add_node(sw2, object=s2)
+        s2.graph.add_node(sw1, object=s1)        
         print(f"Linked {sw1}:{port1} <--> {sw2}:{port2}")
 
     async def start_telnet(self, node: str):

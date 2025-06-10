@@ -2,13 +2,16 @@ import ipaddress
 import networkx as nx
 from typing import Dict, Optional, Tuple
 
+from helper import generate_random_mac
+
 class Packet:
-    def __init__(self, src_ip, dst_ip, src_mac, dst_mac, vlan_tag=None):
+    def __init__(self, src_ip, dst_ip, src_mac, dst_mac, vlan_tag=None, payload=None):
         self.src_ip = src_ip
         self.dst_ip = dst_ip
         self.src_mac = src_mac
         self.dst_mac = dst_mac
         self.vlan_tag = vlan_tag
+        self.payload = payload  # Can be "ping", "arp-request", "arp-reply", etc.
 
 
 class Port:
@@ -30,15 +33,16 @@ class Port:
 
 
 class L3Interface:
-    def __init__(self, name: str, ip_address: str, vlan: Optional[int] = None, port_id: Optional[int] = None):
+    def __init__(self, name: str, ip_address: str, vlan: Optional[int] = None, port_id: Optional[int] = None, mac_address: Optional[str] = None):
         self.name = name
         self.ip_address = ip_address
         self.vlan = vlan
         self.port_id = port_id
+        self.mac_address = mac_address
 
     def __repr__(self):
         scope = f"VLAN {self.vlan}" if self.vlan else f"Port {self.port_id}"
-        return f"{self.name} ({self.ip_address}) - {scope}"
+        return f"{self.name} ({self.ip_address}, MAC {self.mac_address}) - {scope}"
 
 
 class VLAN:
@@ -161,10 +165,26 @@ class OmniSwitch:
             print(f"Route {ip_cidr} not found.")
 
     def create_vlan_interface(self, vlan_id: int, ip_with_prefix: str):
+        # Ensure VLAN exists
+        if vlan_id not in self.vlan_manager.vlans:
+            print(f"\n{self.name}: VLAN {vlan_id} does not exist. Please create it first.\n")
+            return
+
         name = f"VLAN{vlan_id}"
-        self.l3_interfaces[name] = L3Interface(name, ip_with_prefix, vlan=vlan_id)
+        mac = generate_random_mac()
+        iface = L3Interface(name=name, ip_address=ip_with_prefix, vlan=vlan_id, mac_address=mac)
+        self.l3_interfaces[name] = iface
+
+        # Add to routing table
         network = ipaddress.ip_interface(ip_with_prefix).network
-        self.routing_table[str(network)] = (f"VLAN{vlan_id}", "connected")
+        self.routing_table[str(network)] = (name, "connected")
+
+        # Add ARP entry for self
+        ip = str(ipaddress.ip_interface(ip_with_prefix).ip)
+        self.arp_table[ip] = (mac, -1)  # Use -1 to indicate it's a local interface (not tied to a physical port)
+        
+        # Also update MAC table (use dummy internal port -1 or skip learning)
+        self.mac_table[mac] = -1
 
     def assign_l3_interface_to_port(self, port_id: int, ip_with_prefix: str):
         name = f"Port{port_id}"
@@ -261,7 +281,7 @@ class OmniSwitch:
 
         # Step 1: Find route
         next_hop = None
-        route_type = None
+        route_type = None   
         for network, (hop, rtype) in self.routing_table.items():
             if ipaddress.ip_address(packet.dst_ip) in ipaddress.ip_network(network):
                 next_hop = hop
@@ -275,12 +295,20 @@ class OmniSwitch:
         # Step 2: If route is 'connected', treat dst_ip directly
         if route_type == "connected":
             # ARP resolve for dst_ip
-            if packet.dst_ip not in self.arp_table:
-                print(f"{self.name}: No ARP entry for {packet.dst_ip}, sending ARP broadcast")
-                dummy_mac = "de:ad:be:ef:00:01"
-                self.arp_table[packet.dst_ip] = (dummy_mac, 1)
-                self.mac_table[dummy_mac] = 1
-                return self.send_packet(packet, ttl - 1)
+            if next_hop not in self.arp_table:
+                print(f"{self.name}: No ARP entry for next-hop {next_hop}, sending ARP broadcast")
+                arp_request = Packet(
+                    src_ip=packet.src_ip,
+                    dst_ip=packet.dst_ip,
+                    src_mac=packet.src_mac,
+                    dst_mac="ff:ff:ff:ff:ff:ff",
+                    payload={"type": "arp-request", "target_ip": next_hop}
+                )
+                for port in self.ports.values():
+                    if port.status == "up" and port.linked_node:
+                        neighbor = self.graph.nodes[port.linked_node]["object"]
+                        neighbor.receive_packet(arp_request, ttl - 1)
+                return True
 
             dst_mac, port_id = self.arp_table[packet.dst_ip]
             port = self.ports.get(port_id)
@@ -344,6 +372,15 @@ class OmniSwitch:
     def receive_packet(self, packet: Packet, ttl: int):
         print(f"{self.name}: Received packet for {packet.dst_ip} from {packet.src_ip}")
 
+        # Step 0.5: Handle ARP replies
+        if packet.payload and isinstance(packet.payload, dict) and packet.payload.get("type") == "arp-reply":
+            resolved_mac = packet.payload["mac"]
+            self.arp_table[packet.src_ip] = (resolved_mac, -1)
+            self.mac_table[resolved_mac] = -1
+            print(f"{self.name}: Learned ARP from reply: {packet.src_ip} → {resolved_mac}")
+            return True
+
+
         # Step 1: Learn ARP (IP -> MAC) and MAC table (MAC -> Port)
         for port_id, port in self.ports.items():
             if port.status == "up" and port.linked_node:
@@ -387,15 +424,25 @@ class OmniSwitch:
     def ping(self, dst_ip: str):
         print(f"Pinging {dst_ip} from {self.name}...")
 
-        packet = Packet(
-            src_ip="0.0.0.0",  # Replace this with an appropriate source IP if available
-            dst_ip=dst_ip,
-            src_mac="00:11:22:33:44:55",
-            dst_mac="ff:ff:ff:ff:ff:ff"
-        )
+        if not self.l3_interfaces:
+            print("No L3 interface available to send ping from.")
+            return
+
+        # Select the first L3 interface
+        source_iface = next(iter(self.l3_interfaces.values()))
+        src_ip = str(ipaddress.ip_interface(source_iface.ip_address).ip)
+        src_mac = source_iface.mac_address or "00:00:00:00:00:01"
 
         success_count = 0
         for i in range(5):
+            print(f"Sending ping {i+1}...")
+            packet = Packet(
+                src_ip=src_ip,
+                dst_ip=dst_ip,
+                src_mac=src_mac,
+                dst_mac="ff:ff:ff:ff:ff:ff",
+                payload={"type": "ping", "seq": i + 1}
+            )
             if self.send_packet(packet, ttl=10):
                 print(f"Reply from {dst_ip}")
                 success_count += 1
@@ -403,3 +450,4 @@ class OmniSwitch:
                 print(f"Request timeout for {dst_ip}")
 
         print(f"Ping statistics: {success_count}/5 received.")
+
