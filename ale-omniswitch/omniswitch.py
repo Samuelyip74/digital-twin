@@ -259,75 +259,130 @@ class OmniSwitch:
             print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
             return False
 
-        # 1. Check routing table
+        # Step 1: Find route
         next_hop = None
-        for network in self.routing_table:
+        route_type = None
+        for network, (hop, rtype) in self.routing_table.items():
             if ipaddress.ip_address(packet.dst_ip) in ipaddress.ip_network(network):
-                next_hop, route_type = self.routing_table[network]
+                next_hop = hop
+                route_type = rtype
                 break
 
         if not next_hop:
             print(f"{self.name}: No route to {packet.dst_ip}")
             return False
 
-        # 2. If directly connected (e.g. PortX or VLANX)
-        if next_hop.startswith("Port") or next_hop.startswith("VLAN"):
-            # Check ARP
-            if packet.dst_ip in self.arp_table:
-                dst_mac, port_id = self.arp_table[packet.dst_ip]
-                port = self.ports[port_id]
-
-                if port.status != "up":
-                    print(f"{self.name}: Port {port_id} is down")
-                    return False
-
-                packet.dst_mac = dst_mac
-
-                # Check MAC table
-                if dst_mac in self.mac_table:
-                    dst_port = self.mac_table[dst_mac]
-                    dst_port_obj = self.ports.get(dst_port)
-                    if dst_port_obj and dst_port_obj.status == "up" and dst_port_obj.linked_node:
-                        print(f"{self.name}: Forwarding packet to {dst_mac} on port {dst_port}")
-                        next_switch = self.graph.nodes[dst_port_obj.linked_node]["object"]
-                        return next_switch.receive_packet(packet, ttl - 1)
-                    else:
-                        print(f"{self.name}: Destination port {dst_port} is down or unlinked")
-                        return False
-                else:
-                    print(f"{self.name}: MAC {dst_mac} not in MAC table")
-                    return False
-            else:
+        # Step 2: If route is 'connected', treat dst_ip directly
+        if route_type == "connected":
+            # ARP resolve for dst_ip
+            if packet.dst_ip not in self.arp_table:
                 print(f"{self.name}: No ARP entry for {packet.dst_ip}, sending ARP broadcast")
-                # Simulate ARP broadcast: add dummy MAC
                 dummy_mac = "de:ad:be:ef:00:01"
-                self.arp_table[packet.dst_ip] = (dummy_mac, 1)  # Assume discovered on port 1
+                self.arp_table[packet.dst_ip] = (dummy_mac, 1)
                 self.mac_table[dummy_mac] = 1
                 return self.send_packet(packet, ttl - 1)
 
-        # 3. Next-hop forwarding
-        elif next_hop in self.graph:
-            for port_id, port in self.ports.items():
-                if port.status == "up" and port.linked_node == next_hop:
-                    print(f"{self.name}: Routing to next-hop {next_hop} via port {port_id}")
-                    next_switch = self.graph.nodes[next_hop]["object"]
+            dst_mac, port_id = self.arp_table[packet.dst_ip]
+            port = self.ports.get(port_id)
+            if not port or port.status != "up":
+                print(f"{self.name}: Port {port_id} is down")
+                return False
+
+            # MAC resolution
+            if dst_mac in self.mac_table:
+                dst_port = self.mac_table[dst_mac]
+                dst_port_obj = self.ports.get(dst_port)
+                if dst_port_obj and dst_port_obj.status == "up" and dst_port_obj.linked_node:
+                    packet.dst_mac = dst_mac
+                    print(f"{self.name}: Forwarding to {dst_mac} on port {dst_port}")
+                    next_switch = self.graph.nodes[dst_port_obj.linked_node]["object"]
                     return next_switch.receive_packet(packet, ttl - 1)
-            print(f"{self.name}: No port to reach next-hop {next_hop}")
-            return False
+                else:
+                    print(f"{self.name}: Destination port {dst_port} is down or unlinked")
+                    return False
+            else:
+                print(f"{self.name}: MAC {dst_mac} not in MAC table")
+                return False
+
+        # Step 3: If next-hop is another router (static/ospf)
+        elif route_type in ("static", "ospf"):
+            # ARP resolve for next-hop IP
+            if next_hop not in self.arp_table:
+                print(f"{self.name}: No ARP for next-hop {next_hop}, sending ARP broadcast")
+                dummy_mac = "de:ad:be:ef:00:02"
+                self.arp_table[next_hop] = (dummy_mac, 2)
+                self.mac_table[dummy_mac] = 2
+                return self.send_packet(packet, ttl - 1)
+
+            next_mac, port_id = self.arp_table[next_hop]
+            port = self.ports.get(port_id)
+            if not port or port.status != "up":
+                print(f"{self.name}: Port {port_id} is down")
+                return False
+
+            # MAC table lookup
+            if next_mac in self.mac_table:
+                dst_port = self.mac_table[next_mac]
+                dst_port_obj = self.ports.get(dst_port)
+                if dst_port_obj and dst_port_obj.status == "up" and dst_port_obj.linked_node:
+                    packet.dst_mac = next_mac
+                    print(f"{self.name}: Forwarding to next-hop {next_hop} on port {dst_port}")
+                    next_switch = self.graph.nodes[dst_port_obj.linked_node]["object"]
+                    return next_switch.receive_packet(packet, ttl - 1)
+                else:
+                    print(f"{self.name}: Destination port {dst_port} is down or unlinked")
+                    return False
+            else:
+                print(f"{self.name}: MAC {next_mac} not in MAC table")
+                return False
 
         else:
-            print(f"{self.name}: Unknown next-hop {next_hop}")
+            print(f"{self.name}: Unsupported route type {route_type}")
             return False
-    
+
     
     def receive_packet(self, packet: Packet, ttl: int):
-        print(f"{self.name}: Received packet for {packet.dst_ip}")
-        # Check if destination matches one of our L3 interfaces
+        print(f"{self.name}: Received packet for {packet.dst_ip} from {packet.src_ip}")
+
+        # Step 1: Learn ARP (IP -> MAC) and MAC table (MAC -> Port)
+        for port_id, port in self.ports.items():
+            if port.status == "up" and port.linked_node:
+                neighbor = self.graph.nodes[port.linked_node]["object"]
+                neighbor_ips = [
+                    ipaddress.ip_interface(iface.ip_address).ip
+                    for iface in neighbor.l3_interfaces.values()
+                ]
+                if ipaddress.ip_address(packet.src_ip) in neighbor_ips:
+                    self.arp_table[packet.src_ip] = (packet.src_mac, port_id)
+                    self.mac_table[packet.src_mac] = port_id
+                    print(f"{self.name}: Learned ARP {packet.src_ip} → {packet.src_mac} via port {port_id}")
+                    break
+
+        # Step 2: Check if this switch is the destination
         for iface in self.l3_interfaces.values():
             if ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(packet.dst_ip):
                 print(f"{self.name}: Packet reached destination {packet.dst_ip}")
-                return True
-        return self.send_packet(packet, ttl)    
+                # Simulate ping reply
+                print(f"{self.name}: Sending ping reply to {packet.src_ip}")
+                reply = Packet(
+                    src_ip=packet.dst_ip,
+                    dst_ip=packet.src_ip,
+                    src_mac="aa:bb:cc:dd:ee:ff",  # Placeholder
+                    dst_mac=packet.src_mac,
+                    vlan_tag=packet.vlan_tag
+                )
+                return self.send_packet(reply, ttl=10)
+
+        # Step 3: Forward if not for us
+        if ttl <= 1:
+            print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
+            return False
+
+        forwarded = self.send_packet(packet, ttl - 1)
+        if not forwarded:
+            print(f"{self.name}: Packet could not be forwarded.")
+        return forwarded
+ 
 
     def ping(self, dst_ip: str):
         print(f"Pinging {dst_ip} from {self.name}...")
@@ -341,7 +396,6 @@ class OmniSwitch:
 
         success_count = 0
         for i in range(5):
-            print(f"Ping {i+1}...")
             if self.send_packet(packet, ttl=10):
                 print(f"Reply from {dst_ip}")
                 success_count += 1
@@ -349,6 +403,3 @@ class OmniSwitch:
                 print(f"Request timeout for {dst_ip}")
 
         print(f"Ping statistics: {success_count}/5 received.")
-
-
-
