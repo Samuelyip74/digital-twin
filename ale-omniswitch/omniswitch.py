@@ -433,16 +433,19 @@ class OmniSwitch:
             ptype = packet.payload.get("type")
 
             if ptype == "ping":
-                # print(f"{self.name}: Received ping from {packet.src_ip}, replying...")
-                reply = Packet(
-                    src_ip=packet.dst_ip,
-                    dst_ip=packet.src_ip,
-                    src_mac="aa:bb:cc:dd:ee:ff",  # Replace with actual interface MAC if needed
-                    dst_mac=packet.src_mac,
-                    vlan_tag=packet.vlan_tag,
-                    payload={"type": "ping-reply", "seq": packet.payload.get("seq")}
-                )
-                return self.send_packet(reply, ttl=10)
+                # Find the interface whose IP matches the destination
+                for iface in self.l3_interfaces.values():
+                    iface_ip = ipaddress.ip_interface(iface.ip_address).ip
+                    if iface_ip == ipaddress.ip_address(packet.dst_ip):
+                        reply = Packet(
+                            src_ip=packet.dst_ip,
+                            dst_ip=packet.src_ip,
+                            src_mac=iface.mac_address,
+                            dst_mac=packet.src_mac,
+                            vlan_tag=packet.vlan_tag,
+                            payload={"type": "ping-reply", "seq": packet.payload.get("seq")}
+                        )
+                        return self.send_packet(reply, ttl=10)
 
             elif ptype == "ping-reply":
                 # print(f"{self.name}: Received ping-reply from {packet.src_ip}")

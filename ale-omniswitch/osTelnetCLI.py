@@ -143,7 +143,7 @@ class OmniSwitchTelnetCLI:
     def show_mac_table(self, writer):
         writer.write("MAC Address Table:\r\n")
         for mac, entry in self.switch.mac_table.items():
-            writer.write(f"  {mac} => Port {entry['port']}\r\n")
+            writer.write(f"  {mac} => Port {entry}\r\n")
 
     def show_arp_table(self, writer):
         writer.write("ARP Table:\r\n")
