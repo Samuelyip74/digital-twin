@@ -1,3 +1,4 @@
+import time
 import ipaddress
 import networkx as nx
 from typing import Dict, Optional, Tuple
@@ -130,6 +131,7 @@ class OSPFEngine:
 
 class OmniSwitch:
     def __init__(self, name="OmniSwitch", timezone="UTC", system_contact="not-set"):
+        self.ping_reply_received = False  # Add this line
         self.name = name
         self.timezone = timezone
         self.system_contact = system_contact
@@ -280,6 +282,7 @@ class OmniSwitch:
             return False
 
         # Step 1: Find route
+        dst_ip = None
         next_hop = None
         route_type = None   
         for network, (hop, rtype) in self.routing_table.items():
@@ -294,15 +297,16 @@ class OmniSwitch:
 
         # Step 2: If route is 'connected', treat dst_ip directly
         if route_type == "connected":
+            dst_ip = packet.dst_ip
             # ARP resolve for dst_ip
-            if next_hop not in self.arp_table:
-                print(f"{self.name}: No ARP entry for next-hop {next_hop}, sending ARP broadcast")
+            if dst_ip not in self.arp_table:
+                print(f"{self.name}: No ARP entry for next-hop {dst_ip}, sending ARP broadcast")
                 arp_request = Packet(
                     src_ip=packet.src_ip,
                     dst_ip=packet.dst_ip,
                     src_mac=packet.src_mac,
                     dst_mac="ff:ff:ff:ff:ff:ff",
-                    payload={"type": "arp-request", "target_ip": next_hop}
+                    payload={"type": "arp-request", "target_ip": dst_ip}
                 )
                 for port in self.ports.values():
                     if port.status == "up" and port.linked_node:
@@ -372,16 +376,12 @@ class OmniSwitch:
     def receive_packet(self, packet: Packet, ttl: int):
         print(f"{self.name}: Received packet for {packet.dst_ip} from {packet.src_ip}")
 
-        # Step 0.5: Handle ARP replies
-        if packet.payload and isinstance(packet.payload, dict) and packet.payload.get("type") == "arp-reply":
-            resolved_mac = packet.payload["mac"]
-            self.arp_table[packet.src_ip] = (resolved_mac, -1)
-            self.mac_table[resolved_mac] = -1
-            print(f"{self.name}: Learned ARP from reply: {packet.src_ip} → {resolved_mac}")
-            return True
+        # Handle TTL expired
+        if ttl <= 1:
+            print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
+            return False               
 
-
-        # Step 1: Learn ARP (IP -> MAC) and MAC table (MAC -> Port)
+        # Step 0: Learn ARP (IP -> MAC) and MAC table (MAC -> Port)
         for port_id, port in self.ports.items():
             if port.status == "up" and port.linked_node:
                 neighbor = self.graph.nodes[port.linked_node]["object"]
@@ -395,59 +395,103 @@ class OmniSwitch:
                     print(f"{self.name}: Learned ARP {packet.src_ip} → {packet.src_mac} via port {port_id}")
                     break
 
-        # Step 2: Check if this switch is the destination
-        for iface in self.l3_interfaces.values():
-            if ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(packet.dst_ip):
-                print(f"{self.name}: Packet reached destination {packet.dst_ip}")
-                # Simulate ping reply
-                print(f"{self.name}: Sending ping reply to {packet.src_ip}")
+        # Step 1 : Handle ARP request
+        if packet.payload and isinstance(packet.payload, dict):
+            if packet.payload.get("type") == "arp-request":
+                target_ip = packet.payload.get("target_ip")
+                for iface in self.l3_interfaces.values():
+                    if ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(target_ip):
+                        # Send ARP reply
+                        arp_reply = Packet(
+                            src_ip=target_ip,
+                            dst_ip=packet.src_ip,
+                            src_mac=iface.mac_address,
+                            dst_mac=packet.src_mac,
+                            vlan_tag=packet.vlan_tag,
+                            payload={"type": "arp-reply", "mac": iface.mac_address}
+                        )
+                        print(f"{self.name}: Responding to ARP request for {target_ip}")
+                        return self.send_packet(arp_reply, ttl)
+                return True  # Drop if we don't own the target IP
+
+        # Step 2: Handle ARP replies
+        if packet.payload and isinstance(packet.payload, dict) and packet.payload.get("type") == "arp-reply":
+            resolved_mac = packet.payload["mac"]
+            self.arp_table[packet.src_ip] = (resolved_mac, -1)
+            self.mac_table[resolved_mac] = -1
+            print(f"{self.name}: Learned ARP from reply: {packet.src_ip} → {resolved_mac}")
+            return True
+
+        # Step 3: Check if this switch is the destination
+        # for iface in self.l3_interfaces.values():
+        #     if ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(packet.dst_ip):
+        #         print(f"{self.name}: Packet reached destination {packet.dst_ip}")
+
+        # Handle ping echo request
+        if packet.payload and isinstance(packet.payload, dict):
+            ptype = packet.payload.get("type")
+
+            if ptype == "ping":
+                print(f"{self.name}: Received ping from {packet.src_ip}, replying...")
                 reply = Packet(
                     src_ip=packet.dst_ip,
                     dst_ip=packet.src_ip,
-                    src_mac="aa:bb:cc:dd:ee:ff",  # Placeholder
+                    src_mac="aa:bb:cc:dd:ee:ff",  # Replace with actual interface MAC if needed
                     dst_mac=packet.src_mac,
-                    vlan_tag=packet.vlan_tag
+                    vlan_tag=packet.vlan_tag,
+                    payload={"type": "ping-reply", "seq": packet.payload.get("seq")}
                 )
                 return self.send_packet(reply, ttl=10)
 
-        # Step 3: Forward if not for us
-        if ttl <= 1:
-            print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
-            return False
+            elif ptype == "ping-reply":
+                print(f"{self.name}: Received ping-reply from {packet.src_ip}")
+                self.ping_reply_received = True
+                return True
 
+        # Step 4: Forward if not for us, decrement ttl by 1
         forwarded = self.send_packet(packet, ttl - 1)
         if not forwarded:
             print(f"{self.name}: Packet could not be forwarded.")
         return forwarded
  
 
-    def ping(self, dst_ip: str):
+    def ping(self, dst_ip: str, count: int = 5, timeout: float = 1.0):
         print(f"Pinging {dst_ip} from {self.name}...")
 
         if not self.l3_interfaces:
             print("No L3 interface available to send ping from.")
             return
 
-        # Select the first L3 interface
         source_iface = next(iter(self.l3_interfaces.values()))
         src_ip = str(ipaddress.ip_interface(source_iface.ip_address).ip)
         src_mac = source_iface.mac_address or "00:00:00:00:00:01"
 
         success_count = 0
-        for i in range(5):
-            print(f"Sending ping {i+1}...")
+
+        for seq in range(1, count + 1):
+            print(f"Sending ping {seq}...")
+
+            self.ping_reply_received = False  # Reset before each attempt
+
             packet = Packet(
                 src_ip=src_ip,
                 dst_ip=dst_ip,
                 src_mac=src_mac,
                 dst_mac="ff:ff:ff:ff:ff:ff",
-                payload={"type": "ping", "seq": i + 1}
+                payload={"type": "ping", "seq": seq}
             )
-            if self.send_packet(packet, ttl=10):
-                print(f"Reply from {dst_ip}")
-                success_count += 1
-            else:
+
+            self.send_packet(packet, ttl=10)
+
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if self.ping_reply_received:
+                    print(f"Reply from {dst_ip}: seq={seq} time={round((time.time()-start_time)*1000)}ms")
+                    success_count += 1
+                    time.sleep(0.1)  # Polling interval
+                    break
+
+            if not self.ping_reply_received:
                 print(f"Request timeout for {dst_ip}")
 
-        print(f"Ping statistics: {success_count}/5 received.")
-
+        print(f"Ping statistics: {success_count}/{count} received.")
