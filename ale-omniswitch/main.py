@@ -71,6 +71,20 @@ class NetworkLabCLI:
         for name in self.switches:
             print(f" - {name}")
 
+    def show_topology(self):
+        print("Current Topology:")
+        seen_links = set()
+
+        for sw_name, switch in self.switches.items():
+            for port_id, port in switch.ports.items():
+                if port.linked_node:
+                    # Create a consistent, undirected link key to avoid duplicates
+                    link_key = tuple(sorted([(sw_name, port_id), (port.linked_node, switch.ports[port_id].port_id)]))
+                    if link_key not in seen_links:
+                        seen_links.add(link_key)
+                        print(f"  {sw_name}:{port_id} <--> {port.linked_node}:{self.switches[port.linked_node].ports[port_id].port_id}")
+
+
     async def run(self):
         print("Welcome to Network Lab CLI. Type 'help' for commands.")
         while True:
@@ -97,6 +111,7 @@ class NetworkLabCLI:
     link <sw1> <p1> <sw2> <p2> - Link two switch ports
     list                      - List all switch nodes
     start telnet <name>       - Start Telnet server for switch
+    show topology             - Show the topology created
     exit                      - Exit CLI
     """)
             elif cmd.startswith("add node"):
@@ -113,14 +128,45 @@ class NetworkLabCLI:
             elif cmd.startswith("start telnet"):
                 _, _, name = cmd.split()
                 await self.start_telnet(name)
+            elif cmd == "show topology":
+                self.show_topology()                
             else:
                 print(f"Unknown command: {cmd}")
 
 
+    async def load_config(self):
+        print("[Lab] Loading predefined configuration...")
+
+        # Step 1: Add nodes
+        self.add_node("sw1")
+        self.add_node("sw2")
+
+        # Step 2: Link sw1:1 <--> sw2:1
+        self.link("sw1", 1, "sw2", 1)
+
+        # Step 3: Apply VLAN and IP config
+        sw1 = self.switches["sw1"]
+        sw2 = self.switches["sw2"]
+
+        sw1.vlan_manager.create_vlan(1)
+        sw1.create_vlan_interface(1, "10.1.1.1/24")
+
+        sw2.vlan_manager.create_vlan(1)
+        sw2.create_vlan_interface(1, "10.1.1.2/24")
+        await self.start_telnet("sw1")
+        await self.start_telnet("sw2")
+        print("[Lab] Configuration loaded.")
+
+
+
 if __name__ == "__main__":
-    try:
+    async def main():
         lab = NetworkLabCLI()
-        asyncio.run(lab.run())
+        await lab.load_config()  # ✅ Await the async config loader
+        await lab.run()          # ✅ Await the CLI loop
+
+    try:
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\nShutting down network lab.")
 
