@@ -237,6 +237,7 @@ class NetworkLabCLI:
 
         sw1.vlan_manager.create_vlan(1)
         sw1.create_vlan_interface(1, "10.1.1.1/24")
+        sw1.add_route("10.1.2.0/24","10.1.1.2")
 
         sw2.vlan_manager.create_vlan(1)
         sw2.create_vlan_interface(1, "10.1.1.2/24")
@@ -245,6 +246,8 @@ class NetworkLabCLI:
 
         sw3.vlan_manager.create_vlan(2)
         sw3.create_vlan_interface(2, "10.1.2.3/24")        
+        sw3.add_route("10.1.1.0/24","10.1.2.2")
+
         await self.start_telnet("sw1")
         await self.start_telnet("sw2")
         await self.start_telnet("sw3")

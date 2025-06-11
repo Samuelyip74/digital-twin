@@ -560,7 +560,7 @@ class OmniSwitch:
         return self._forward(packet, ttl, in_port_id)
 
 
-    def ping(self, dst_ip: str, writer, count: int = 2, timeout: float = 1.0):
+    def ping(self, dst_ip: str, writer, count: int = 4, timeout: float = 1.0):
         writer.write(f"Pinging {dst_ip} with 32 bytes of data:\r\n")
 
         if not self.l3_interfaces:
