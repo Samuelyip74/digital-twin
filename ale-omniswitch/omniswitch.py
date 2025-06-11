@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict, deque
 import ipaddress
 import networkx as nx
 from typing import Dict, Optional, Tuple
@@ -132,6 +133,8 @@ class OSPFEngine:
 class OmniSwitch:
     def __init__(self, name="OmniSwitch", timezone="UTC", system_contact="not-set"):
         self.ping_reply_received = False  # Add this line
+        self.arp_queue = defaultdict(deque)  # dst_ip -> deque of (packet, ttl, timestamp)
+        self.arp_request_timestamps = {}     # dst_ip -> last_request_time        
         self.name = name
         self.timezone = timezone
         self.system_contact = system_contact
@@ -148,16 +151,20 @@ class OmniSwitch:
 
     # Helper class
     def _learn_arp(self, packet: Packet, in_port_id: int):
-        print(f"{self.name}: _learn_arp called with in_port_id={in_port_id} for {packet.src_ip} → {packet.src_mac}")
-
         if in_port_id is None or in_port_id not in self.ports:
             return
 
-        # Trust the port it arrived on
+        # Only learn from ARP packets
+        if not self._is_arp_request(packet) and not self._is_arp_reply(packet):
+            return
+
+        print(f"{self.name}: _learn_arp called with in_port_id={in_port_id} for {packet.src_ip} → {packet.src_mac}")
+
         self.arp_table[packet.src_ip] = (packet.src_mac, in_port_id)
         self.mac_table[packet.src_mac] = in_port_id
 
         print(f"{self.name}: Learned ARP {packet.src_ip} → {packet.src_mac} on port {in_port_id}")
+
 
     def _is_arp_request(self, packet: Packet) -> bool:
         return isinstance(packet.payload, dict) and packet.payload.get("type") == "arp-request"
@@ -204,20 +211,24 @@ class OmniSwitch:
     def _is_arp_reply(self, packet: Packet) -> bool:
         return isinstance(packet.payload, dict) and packet.payload.get("type") == "arp-reply"
 
-    def _handle_arp_reply(self, packet: Packet, in_port_id: int = None) -> bool:
-        resolved_mac = packet.payload["mac"]
-        
-        if in_port_id is not None:
-            self.arp_table[packet.src_ip] = (resolved_mac, in_port_id)
-            self.mac_table[resolved_mac] = in_port_id
-        else:
-            if packet.src_ip not in self.arp_table:
-                self.arp_table[packet.src_ip] = (resolved_mac, -1)
-            if resolved_mac not in self.mac_table:
-                self.mac_table[resolved_mac] = -1
+    def _handle_arp_reply(self, packet: Packet, in_port_id: int):
+        sender_ip = packet.src_ip
+        sender_mac = packet.src_mac
+        print(f"{self.name}: Learned ARP from reply: {sender_ip} → {sender_mac} via port {in_port_id}")
 
-        print(f"{self.name}: Learned ARP from reply: {packet.src_ip} → {resolved_mac} via port {in_port_id}")
-        return True
+        self.arp_table[sender_ip] = (sender_mac, in_port_id)
+        self.mac_table[sender_mac] = in_port_id
+
+        # Process queued packets
+        if sender_ip in self.arp_queue:
+            queued = list(self.arp_queue.pop(sender_ip))
+            for queued_packet, queued_ttl, timestamp in queued:
+                if time.time() - timestamp <= 5:
+                    print(f"{self.name}: Sending queued packet to {sender_ip}")
+                    self._handle_connected_route(queued_packet, queued_ttl)
+                else:
+                    print(f"{self.name}: Dropped expired queued packet to {sender_ip}")
+
 
     def _is_local_destination(self, dst_ip: str) -> bool:
         print(f"dst_ip is {dst_ip}")
@@ -288,42 +299,68 @@ class OmniSwitch:
 
     def _handle_connected_route(self, packet: Packet, ttl: int, exclude_port: int = None):
         dst_ip = packet.dst_ip
+        current_time = time.time()
+
+        # Step 1: ARP lookup
         if dst_ip not in self.arp_table:
-            print(f"{self.name}: Sending ARP request")
-            self._send_arp_request(dst_ip, packet.src_ip, packet.src_mac, ttl, exclude_port)
+            last_sent = self.arp_request_timestamps.get(dst_ip)
+            if not last_sent or current_time - last_sent > 1:
+                print(f"{self.name}: Sending ARP request for {dst_ip}")
+                self._send_arp_request(dst_ip, packet.src_ip, packet.src_mac, ttl, exclude_port)
+                self.arp_request_timestamps[dst_ip] = current_time
+
+            self.arp_queue[dst_ip].append((packet, ttl, current_time))
             return True
 
+        # Step 2: ARP resolved — send packet
         dst_mac, port_id = self.arp_table[dst_ip]
         port_info = self._valid_port(port_id)
         if not port_info:
+            print(f"{self.name}: Invalid port {port_id} for {dst_ip}")
             return False
 
         port, neighbor = port_info
         packet.dst_mac = dst_mac
-        print(f"{self.name}: Sending Packet to {dst_ip} on port {port.port_id}")
+        print(f"{self.name}: Forwarding packet to {dst_ip} via port {port.port_id}")
 
-        # Step 3: Send to correct neighbor using reverse-linked port
+        # Step 3: Find neighbor's port that links back to this switch
         for nbr_port_id, nbr_port in neighbor.ports.items():
             if nbr_port.linked_node == self.name:
-                print(f"{self.name}: Sending packet to {neighbor.name} via port {port.port_id}, neighbor sees it on port {nbr_port_id}")
                 return neighbor.receive_packet(packet, ttl - 1, in_port_id=nbr_port_id)
 
-        print(f"{self.name}: Could not find reverse link on neighbor {neighbor.name}")
+        print(f"{self.name}: Could not find reverse port on {neighbor.name} for {dst_ip}")
         return False
 
+
+
     def _handle_indirect_route(self, packet: Packet, next_hop: str, ttl: int, exclude_port: int = None):
+        current_time = time.time()
+
+        # Step 1: Check ARP table
         if next_hop not in self.arp_table:
-            self._send_arp_request(next_hop, packet.src_ip, packet.src_mac, ttl, exclude_port)
+            # Step 2: Send ARP request if not recently sent
+            last_sent = self.arp_request_timestamps.get(next_hop)
+            if not last_sent or current_time - last_sent > 1:
+                print(f"{self.name}: Sending ARP request for next hop {next_hop}")
+                self._send_arp_request(next_hop, packet.src_ip, packet.src_mac, ttl, exclude_port)
+                self.arp_request_timestamps[next_hop] = current_time
+
+            # Step 3: Enqueue packet
+            self.arp_queue[next_hop].append((packet, ttl, current_time))
             return True
 
+        # Step 4: If ARP entry exists, forward the packet
         next_mac, port_id = self.arp_table[next_hop]
         port_info = self._valid_port(port_id)
         if not port_info:
+            print(f"{self.name}: Invalid port {port_id} for next hop {next_hop}")
             return False
 
         port, neighbor = port_info
         packet.dst_mac = next_mac
+        print(f"{self.name}: Forwarding packet to {packet.dst_ip} via next hop {next_hop} on port {port.port_id}")
         return neighbor.receive_packet(packet, ttl - 1, in_port_id=port.port_id)
+
 
     def _is_local_ip(self, ip: str) -> bool:
         return any(
@@ -460,58 +497,68 @@ class OmniSwitch:
         self.ospf.show_routing_table()
 
     def send_packet(self, packet: Packet, ttl: int = 10, exclude_port: int = None):
-        print(f"{self.name} sending packet to {packet.dst_ip} and excluded port is {exclude_port}")
+        print(f"{self.name}: Sending packet to {packet.dst_ip} (exclude port={exclude_port})")
+
+        # Step 1: Check TTL
         if ttl <= 0:
             print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
             return False
 
+        # Step 2: Route Lookup
         next_hop, route_type = self._lookup_route(packet.dst_ip)
         if not next_hop:
             print(f"{self.name}: No route to {packet.dst_ip}")
             return False
 
+        print(f"{self.name}: Found next hop {next_hop} via {route_type} route")
+
+        # Step 3: Forward Based on Route Type
         if route_type == "connected":
-            print(f"{self.name}: Sending to connected network")
             return self._handle_connected_route(packet, ttl, exclude_port)
         elif route_type in ("static", "ospf"):
-            print(f"{self.name} is sending to external network")
             return self._handle_indirect_route(packet, next_hop, ttl, exclude_port)
         else:
             print(f"{self.name}: Unsupported route type {route_type}")
             return False
+
     
     def receive_packet(self, packet: Packet, ttl: int, in_port_id: int = None):
         print(f"{self.name}: receive_packet called for {packet.dst_ip} (from {packet.src_ip}) on port {in_port_id}")        
-        
+
         if ttl <= 1:
             print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
             return False
 
         self._learn_arp(packet, in_port_id)
 
-        if self._is_arp_request(packet):
-            return self._handle_arp_request(packet, ttl, in_port_id)
-
-        if self._is_arp_reply(packet):
-            self._handle_arp_reply(packet, in_port_id)
-            dst_is_local = self._is_local_destination(packet.dst_ip)
-            if not dst_is_local:
-                return self._forward(packet, ttl, in_port_id)
-            return True
-
+        # Is the destination one of our interfaces?
         dst_is_local = self._is_local_destination(packet.dst_ip)
 
+        # ARP request
+        if self._is_arp_request(packet):
+            handled = self._handle_arp_request(packet, ttl, in_port_id)
+            return handled or self._forward(packet, ttl, in_port_id)
+
+        # ARP reply
+        if self._is_arp_reply(packet):
+            self._handle_arp_reply(packet, in_port_id)
+            return True if dst_is_local else self._forward(packet, ttl, in_port_id)
+
+        # ICMP ping
         if self._is_ping(packet):
             return self._handle_ping(packet, ttl) if dst_is_local else self._forward(packet, ttl, in_port_id)
 
+        # ICMP reply
         if self._is_ping_reply(packet):
             return self._handle_ping_reply() if dst_is_local else self._forward(packet, ttl, in_port_id)
 
-        if self._is_local_ip(packet.dst_ip):
+        # Catch-all for traffic to local
+        if dst_is_local:
             print(f"{self.name}: Packet for me ({packet.dst_ip}) - stopping here.")
             return True
 
         return self._forward(packet, ttl, in_port_id)
+
 
     def ping(self, dst_ip: str, writer, count: int = 2, timeout: float = 1.0):
         writer.write(f"Pinging {dst_ip} with 32 bytes of data:\r\n")
