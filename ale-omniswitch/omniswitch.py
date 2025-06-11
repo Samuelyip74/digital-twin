@@ -146,6 +146,192 @@ class OmniSwitch:
         self.graph.add_node(self.name)
         self.ospf = OSPFEngine(self.name)
 
+    # Helper class
+    def _learn_arp(self, packet: Packet, in_port_id: int):
+        print(f"{self.name}: _learn_arp called with in_port_id={in_port_id} for {packet.src_ip} → {packet.src_mac}")
+
+        if in_port_id is None or in_port_id not in self.ports:
+            return
+
+        # Trust the port it arrived on
+        self.arp_table[packet.src_ip] = (packet.src_mac, in_port_id)
+        self.mac_table[packet.src_mac] = in_port_id
+
+        print(f"{self.name}: Learned ARP {packet.src_ip} → {packet.src_mac} on port {in_port_id}")
+
+    def _is_arp_request(self, packet: Packet) -> bool:
+        return isinstance(packet.payload, dict) and packet.payload.get("type") == "arp-request"
+
+    def _handle_arp_request(self, packet: Packet, ttl: int, in_port_id: int) -> bool:
+        target_ip = packet.payload.get("target_ip")
+
+        # Step 1: Check if this switch owns the target IP
+        for iface in self.l3_interfaces.values():
+            if ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(target_ip):
+                print(f"{self.name}: Replying to ARP request for {target_ip} for port {in_port_id}")
+
+                # Build ARP reply
+                arp_reply = Packet(
+                    src_ip=target_ip,
+                    dst_ip=packet.src_ip,
+                    src_mac=iface.mac_address,
+                    dst_mac=packet.src_mac,
+                    vlan_tag=packet.vlan_tag,
+                    payload={"type": "arp-reply", "mac": iface.mac_address}
+                )
+
+                # Send reply using proper routing logic
+                return self.send_packet(arp_reply, ttl - 1)
+
+        # Step 2: Flood the ARP request to all other ports
+        for port in self.ports.values():
+            if port.status == "up" and port.linked_node and port.port_id != in_port_id:
+                print(f"{self.name}: Port: {port.port_id}, Neighbor: {port.linked_node}")
+                neighbor = self.graph.nodes[port.linked_node]["object"]
+
+                # Find the reverse port (on neighbor) that links back to this switch
+                for nbr_port_id, nbr_port in neighbor.ports.items():
+                    if nbr_port.linked_node == self.name:
+                        print(f"{self.name}: Flooding ARP request for {target_ip} to neighbor {neighbor.name} port {nbr_port_id}")
+                        neighbor.receive_packet(packet, ttl - 1, in_port_id=nbr_port_id)
+                        break  # only break inner loop, continue flooding other neighbors
+
+
+        return True
+
+
+
+    def _is_arp_reply(self, packet: Packet) -> bool:
+        return isinstance(packet.payload, dict) and packet.payload.get("type") == "arp-reply"
+
+    def _handle_arp_reply(self, packet: Packet, in_port_id: int = None) -> bool:
+        resolved_mac = packet.payload["mac"]
+        
+        if in_port_id is not None:
+            self.arp_table[packet.src_ip] = (resolved_mac, in_port_id)
+            self.mac_table[resolved_mac] = in_port_id
+        else:
+            if packet.src_ip not in self.arp_table:
+                self.arp_table[packet.src_ip] = (resolved_mac, -1)
+            if resolved_mac not in self.mac_table:
+                self.mac_table[resolved_mac] = -1
+
+        print(f"{self.name}: Learned ARP from reply: {packet.src_ip} → {resolved_mac} via port {in_port_id}")
+        return True
+
+    def _is_local_destination(self, dst_ip: str) -> bool:
+        print(f"dst_ip is {dst_ip}")
+        for iface in self.l3_interfaces.values():
+            if ipaddress.ip_address(dst_ip) == ipaddress.ip_interface(iface.ip_address).ip:
+                return True
+        return False
+
+    def _is_ping(self, packet: Packet) -> bool:
+        return isinstance(packet.payload, dict) and packet.payload.get("type") == "ping"
+
+    def _handle_ping(self, packet: Packet, ttl: int) -> bool:
+        for iface in self.l3_interfaces.values():
+            if ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(packet.dst_ip):
+                reply = Packet(
+                    src_ip=packet.dst_ip,
+                    dst_ip=packet.src_ip,
+                    src_mac=iface.mac_address,
+                    dst_mac=packet.src_mac,
+                    vlan_tag=packet.vlan_tag,
+                    payload={"type": "ping-reply", "seq": packet.payload.get("seq")}
+                )
+                return self.send_packet(reply, ttl=10)
+        return False
+
+    def _is_ping_reply(self, packet: Packet) -> bool:
+        return isinstance(packet.payload, dict) and packet.payload.get("type") == "ping-reply"
+
+    def _handle_ping_reply(self) -> bool:
+        self.ping_reply_received = True
+        return True
+
+    def _forward(self, packet: Packet, ttl: int, exclude_port: int = None) -> bool:
+        forwarded = self.send_packet(packet, ttl - 1, exclude_port=exclude_port)
+        if not forwarded:
+            print(f"{self.name}: Packet could not be forwarded.")
+        return forwarded
+            
+    def _lookup_route(self, dst_ip: str):
+        for network, (next_hop, route_type) in self.routing_table.items():
+            if ipaddress.ip_address(dst_ip) in ipaddress.ip_network(network):
+                return next_hop, route_type
+        return None, None
+
+    def _send_arp_request(self, target_ip: str, src_ip: str, src_mac: str, ttl: int, exclude_port: int = None):
+        arp_request = Packet(
+            src_ip=src_ip,
+            dst_ip=target_ip,
+            src_mac=src_mac,
+            dst_mac="ff:ff:ff:ff:ff:ff",
+            payload={"type": "arp-request", "target_ip": target_ip}
+        )
+        for port in self.ports.values():
+            if port.status == "up" and port.linked_node and port.port_id != exclude_port:
+                neighbor = self.graph.nodes[port.linked_node]["object"]
+                for nbr_port_id, nbr_port in neighbor.ports.items():
+                    if nbr_port.linked_node == self.name:
+                        neighbor.receive_packet(arp_request, ttl - 1, in_port_id=nbr_port_id)
+                        print(f"{self.name}: Send packet from Port {port.port_id} to {port.linked_node}, incoming port {nbr_port_id}.")
+
+    def _valid_port(self, port_id: int) -> Optional[Tuple['Port', 'OmniSwitch']]:
+        port = self.ports.get(port_id)
+        if port and port.status == "up" and port.linked_node:
+            neighbor = self.graph.nodes[port.linked_node]["object"]
+            return port, neighbor
+        return None
+
+
+    def _handle_connected_route(self, packet: Packet, ttl: int, exclude_port: int = None):
+        dst_ip = packet.dst_ip
+        if dst_ip not in self.arp_table:
+            print(f"{self.name}: Sending ARP request")
+            self._send_arp_request(dst_ip, packet.src_ip, packet.src_mac, ttl, exclude_port)
+            return True
+
+        dst_mac, port_id = self.arp_table[dst_ip]
+        port_info = self._valid_port(port_id)
+        if not port_info:
+            return False
+
+        port, neighbor = port_info
+        packet.dst_mac = dst_mac
+        print(f"{self.name}: Sending Packet to {dst_ip} on port {port.port_id}")
+
+        # Step 3: Send to correct neighbor using reverse-linked port
+        for nbr_port_id, nbr_port in neighbor.ports.items():
+            if nbr_port.linked_node == self.name:
+                print(f"{self.name}: Sending packet to {neighbor.name} via port {port.port_id}, neighbor sees it on port {nbr_port_id}")
+                return neighbor.receive_packet(packet, ttl - 1, in_port_id=nbr_port_id)
+
+        print(f"{self.name}: Could not find reverse link on neighbor {neighbor.name}")
+        return False
+
+    def _handle_indirect_route(self, packet: Packet, next_hop: str, ttl: int, exclude_port: int = None):
+        if next_hop not in self.arp_table:
+            self._send_arp_request(next_hop, packet.src_ip, packet.src_mac, ttl, exclude_port)
+            return True
+
+        next_mac, port_id = self.arp_table[next_hop]
+        port_info = self._valid_port(port_id)
+        if not port_info:
+            return False
+
+        port, neighbor = port_info
+        packet.dst_mac = next_mac
+        return neighbor.receive_packet(packet, ttl - 1, in_port_id=port.port_id)
+
+    def _is_local_ip(self, ip: str) -> bool:
+        return any(
+            ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(ip)
+            for iface in self.l3_interfaces.values()
+        )
+
+    # Class Methods
     def set_system_name(self, name: str): self.name = name
     def set_timezone(self, tz: str): self.timezone = tz
     def set_system_contact(self, contact: str): self.system_contact = contact
@@ -167,7 +353,6 @@ class OmniSwitch:
             print(f"Route {ip_cidr} not found.")
 
     def create_vlan_interface(self, vlan_id: int, ip_with_prefix: str):
-        # Ensure VLAN exists
         if vlan_id not in self.vlan_manager.vlans:
             print(f"\n{self.name}: VLAN {vlan_id} does not exist. Please create it first.\n")
             return
@@ -177,15 +362,13 @@ class OmniSwitch:
         iface = L3Interface(name=name, ip_address=ip_with_prefix, vlan=vlan_id, mac_address=mac)
         self.l3_interfaces[name] = iface
 
-        # Add to routing table
+        # Add to routing table using the IP address, not the name
         network = ipaddress.ip_interface(ip_with_prefix).network
-        self.routing_table[str(network)] = (name, "connected")
-
-        # Add ARP entry for self
         ip = str(ipaddress.ip_interface(ip_with_prefix).ip)
-        self.arp_table[ip] = (mac, -1)  # Use -1 to indicate it's a local interface (not tied to a physical port)
-        
-        # Also update MAC table (use dummy internal port -1 or skip learning)
+        self.routing_table[str(network)] = (ip, "connected")
+
+        # Self ARP
+        self.arp_table[ip] = (mac, -1)
         self.mac_table[mac] = -1
 
     def assign_l3_interface_to_port(self, port_id: int, ip_with_prefix: str):
@@ -276,190 +459,61 @@ class OmniSwitch:
     def show_ospf_routes(self):
         self.ospf.show_routing_table()
 
-    def send_packet(self, packet: Packet, ttl: int = 10):
+    def send_packet(self, packet: Packet, ttl: int = 10, exclude_port: int = None):
+        print(f"{self.name} sending packet to {packet.dst_ip} and excluded port is {exclude_port}")
         if ttl <= 0:
             print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
             return False
 
-        # Initialize variables
-        dst_mac = None
-        dst_port = None
-        next_hop = None
-        route_type = None
-
-        # Step 1: Find route
-        for network, (hop, rtype) in self.routing_table.items():
-            if ipaddress.ip_address(packet.dst_ip) in ipaddress.ip_network(network):
-                next_hop = hop
-                route_type = rtype
-                break
-
+        next_hop, route_type = self._lookup_route(packet.dst_ip)
         if not next_hop:
             print(f"{self.name}: No route to {packet.dst_ip}")
             return False
 
-        # Step 2: If route is 'connected', treat dst_ip directly
         if route_type == "connected":
-            dst_ip = packet.dst_ip
-            if dst_ip not in self.arp_table:
-                # print(f"{self.name}: No ARP entry for {dst_ip}, sending ARP broadcast")
-                arp_request = Packet(
-                    src_ip=packet.src_ip,
-                    dst_ip=packet.dst_ip,
-                    src_mac=packet.src_mac,
-                    dst_mac="ff:ff:ff:ff:ff:ff",
-                    payload={"type": "arp-request", "target_ip": dst_ip}
-                )
-                # Send ARP request out all ports
-                for port in self.ports.values():
-                    if port.status == "up" and port.linked_node:
-                        neighbor = self.graph.nodes[port.linked_node]["object"]
-                        neighbor.receive_packet(arp_request, ttl - 1)
-                return True
-
-            dst_mac, port_id = self.arp_table[dst_ip]
-            port = self.ports.get(port_id)
-            if not port or port.status != "up":
-                # print(f"{self.name}: Port {port_id} is down")
-                return False
-
-            # Forward packet to destination
-            packet.dst_mac = dst_mac
-            # print(f"{self.name}: Forwarding to {dst_mac} on port {port_id}")
-            neighbor = self.graph.nodes[port.linked_node]["object"]
-            return neighbor.receive_packet(packet, ttl - 1)
-
-        # Step 3: If next-hop is another router (static/ospf)
+            print(f"{self.name}: Sending to connected network")
+            return self._handle_connected_route(packet, ttl, exclude_port)
         elif route_type in ("static", "ospf"):
-            if next_hop not in self.arp_table:
-                # print(f"{self.name}: No ARP for next-hop {next_hop}, sending ARP broadcast")
-                arp_request = Packet(
-                    src_ip=packet.src_ip,
-                    dst_ip=next_hop,
-                    src_mac=packet.src_mac,
-                    dst_mac="ff:ff:ff:ff:ff:ff",
-                    payload={"type": "arp-request", "target_ip": next_hop}
-                )
-                # Send ARP request out all ports
-                for port in self.ports.values():
-                    if port.status == "up" and port.linked_node:
-                        neighbor = self.graph.nodes[port.linked_node]["object"]
-                        neighbor.receive_packet(arp_request, ttl - 1)
-                return True
-
-            next_mac, port_id = self.arp_table[next_hop]
-            port = self.ports.get(port_id)
-            if not port or port.status != "up":
-                # print(f"{self.name}: Port {port_id} is down")
-                return False
-
-            # Forward packet to next hop
-            packet.dst_mac = next_mac
-            # print(f"{self.name}: Forwarding to next-hop {next_hop} on port {port_id}")
-            neighbor = self.graph.nodes[port.linked_node]["object"]
-            return neighbor.receive_packet(packet, ttl - 1)
-
+            print(f"{self.name} is sending to external network")
+            return self._handle_indirect_route(packet, next_hop, ttl, exclude_port)
         else:
             print(f"{self.name}: Unsupported route type {route_type}")
             return False
     
-    def receive_packet(self, packet: Packet, ttl: int):
-        # print(f"{self.name}: Received packet for {packet.dst_ip} from {packet.src_ip}")
-
-        # Handle TTL expired
+    def receive_packet(self, packet: Packet, ttl: int, in_port_id: int = None):
+        print(f"{self.name}: receive_packet called for {packet.dst_ip} (from {packet.src_ip}) on port {in_port_id}")        
+        
         if ttl <= 1:
             print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
-            return False               
+            return False
 
-        # Step 0: Learn ARP (IP -> MAC) and MAC table (MAC -> Port)
-        for port_id, port in self.ports.items():
-            if port.status == "up" and port.linked_node:
-                neighbor = self.graph.nodes[port.linked_node]["object"]
-                neighbor_ips = [
-                    ipaddress.ip_interface(iface.ip_address).ip
-                    for iface in neighbor.l3_interfaces.values()
-                ]
-                if ipaddress.ip_address(packet.src_ip) in neighbor_ips:
-                    self.arp_table[packet.src_ip] = (packet.src_mac, port_id)
-                    self.mac_table[packet.src_mac] = port_id
-                    # print(f"{self.name}: Learned ARP {packet.src_ip} → {packet.src_mac} via port {port_id}")
-                    break
+        self._learn_arp(packet, in_port_id)
 
-        # Step 1 : Handle ARP request
-        # In the ARP request handling section of receive_packet():
-        if packet.payload and isinstance(packet.payload, dict):
-            if packet.payload.get("type") == "arp-request":
-                target_ip = packet.payload.get("target_ip")
-                for iface in self.l3_interfaces.values():
-                    if ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(target_ip):
-                        # Create ARP reply
-                        arp_reply = Packet(
-                            src_ip=target_ip,
-                            dst_ip=packet.src_ip,
-                            src_mac=iface.mac_address,
-                            dst_mac=packet.src_mac,
-                            vlan_tag=packet.vlan_tag,
-                            payload={"type": "arp-reply", "mac": iface.mac_address}
-                        )
-                        # print(f"{self.name}: Responding to ARP request for {target_ip}")
-                        
-                        # Send it back out the port it came in on
-                        for port_id, port in self.ports.items():
-                            if port.status == "up" and port.linked_node:
-                                neighbor = self.graph.nodes[port.linked_node]["object"]
-                                if ipaddress.ip_address(packet.src_ip) in [ipaddress.ip_interface(niface.ip_address).ip for niface in neighbor.l3_interfaces.values()]:
-                                    return self.send_packet(arp_reply, ttl)
-                        return False
+        if self._is_arp_request(packet):
+            return self._handle_arp_request(packet, ttl, in_port_id)
 
-        # Step 2: Handle ARP replies
-        if packet.payload and isinstance(packet.payload, dict) and packet.payload.get("type") == "arp-reply":
-            resolved_mac = packet.payload["mac"]
-            # Don't overwrite with -1 — only update if not already learned
-            if packet.src_ip not in self.arp_table:
-                self.arp_table[packet.src_ip] = (resolved_mac, -1)
-            if resolved_mac not in self.mac_table:
-                self.mac_table[resolved_mac] = -1
-
-            # print(f"{self.name}: Learned ARP from reply: {packet.src_ip} → {resolved_mac}")
+        if self._is_arp_reply(packet):
+            self._handle_arp_reply(packet, in_port_id)
+            dst_is_local = self._is_local_destination(packet.dst_ip)
+            if not dst_is_local:
+                return self._forward(packet, ttl, in_port_id)
             return True
 
-        # Step 3: Check if this switch is the destination
-        # for iface in self.l3_interfaces.values():
-        #     if ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(packet.dst_ip):
-        #         print(f"{self.name}: Packet reached destination {packet.dst_ip}")
+        dst_is_local = self._is_local_destination(packet.dst_ip)
 
-        # Handle ping echo request
-        if packet.payload and isinstance(packet.payload, dict):
-            ptype = packet.payload.get("type")
+        if self._is_ping(packet):
+            return self._handle_ping(packet, ttl) if dst_is_local else self._forward(packet, ttl, in_port_id)
 
-            if ptype == "ping":
-                # Find the interface whose IP matches the destination
-                for iface in self.l3_interfaces.values():
-                    iface_ip = ipaddress.ip_interface(iface.ip_address).ip
-                    if iface_ip == ipaddress.ip_address(packet.dst_ip):
-                        reply = Packet(
-                            src_ip=packet.dst_ip,
-                            dst_ip=packet.src_ip,
-                            src_mac=iface.mac_address,
-                            dst_mac=packet.src_mac,
-                            vlan_tag=packet.vlan_tag,
-                            payload={"type": "ping-reply", "seq": packet.payload.get("seq")}
-                        )
-                        return self.send_packet(reply, ttl=10)
+        if self._is_ping_reply(packet):
+            return self._handle_ping_reply() if dst_is_local else self._forward(packet, ttl, in_port_id)
 
-            elif ptype == "ping-reply":
-                # print(f"{self.name}: Received ping-reply from {packet.src_ip}")
-                self.ping_reply_received = True
-                return True
+        if self._is_local_ip(packet.dst_ip):
+            print(f"{self.name}: Packet for me ({packet.dst_ip}) - stopping here.")
+            return True
 
-        # Step 4: Forward if not for us, decrement ttl by 1
-        forwarded = self.send_packet(packet, ttl - 1)
-        if not forwarded:
-            print(f"{self.name}: Packet could not be forwarded.")
-        return forwarded
- 
+        return self._forward(packet, ttl, in_port_id)
 
-    def ping(self, dst_ip: str, writer, count: int = 4, timeout: float = 1.0):
+    def ping(self, dst_ip: str, writer, count: int = 2, timeout: float = 1.0):
         writer.write(f"Pinging {dst_ip} with 32 bytes of data:\r\n")
 
         if not self.l3_interfaces:
@@ -484,11 +538,13 @@ class OmniSwitch:
             )
 
             send_time = time.time()
+            sent = self.send_packet(packet, ttl=118)
 
-            if not self.send_packet(packet, ttl=118):
-                writer.write("Request could not be sent.\r\n")
+            if not sent:
+                writer.write("Ping error: failed to send packet.\r\n")
                 continue
 
+            # Wait for reply (simulate blocking ping)
             while time.time() - send_time < timeout:
                 if self.ping_reply_received:
                     rtt = int((time.time() - send_time) * 1000)
@@ -500,7 +556,7 @@ class OmniSwitch:
             else:
                 writer.write(f"Request timed out.\r\n")
 
-        # Statistics
+        # Summary
         lost = count - success_count
         loss_percent = int((lost / count) * 100)
 
@@ -509,5 +565,6 @@ class OmniSwitch:
 
         if rtt_list:
             writer.write("Approximate round trip times in milli-seconds:\r\n")
-            writer.write(f"    Minimum = {min(rtt_list)}ms, Maximum = {max(rtt_list)}ms, Average = {sum(rtt_list)//len(rtt_list)}ms\r\n")
+            writer.write(f"    Minimum = {min(rtt_list)}ms, Maximum = {max(rtt_list)}ms, Average = {sum(rtt_list) // len(rtt_list)}ms\r\n")
+
 
