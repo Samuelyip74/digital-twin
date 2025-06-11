@@ -1,7 +1,8 @@
 import re
+from omniswitch import OmniSwitch
 
 class OmniSwitchTelnetCLI:
-    def __init__(self, switch):
+    def __init__(self, switch: OmniSwitch):
         self.switch = switch
 
     async def interact(self, reader, writer):
