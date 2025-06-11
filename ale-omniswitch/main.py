@@ -188,36 +188,6 @@ class NetworkLabCLI:
                 print(f"Unknown command: {cmd}")
 
 
-    # async def load_config(self):
-    #     print("[Lab] Loading predefined configuration...")
-
-    #     # Step 1: Add nodes
-    #     self.add_node("sw1")
-    #     self.add_node("sw2")
-    #     self.add_node("sw3")
-
-    #     # Step 2: Link sw1:1 <--> sw2:1
-    #     self.link("sw1", 1, "sw2", 1)
-    #     self.link("sw2", 2, "sw3", 1)
-
-    #     # Step 3: Apply VLAN and IP config
-    #     sw1 = self.switches["sw1"]
-    #     sw2 = self.switches["sw2"]
-    #     sw3 = self.switches["sw3"]
-
-    #     sw1.vlan_manager.create_vlan(1)
-    #     sw1.create_vlan_interface(1, "10.1.1.1/24")
-
-    #     sw2.vlan_manager.create_vlan(1)
-    #     sw2.create_vlan_interface(1, "10.1.1.2/24")
-
-    #     sw3.vlan_manager.create_vlan(1)
-    #     sw3.create_vlan_interface(1, "10.1.1.3/24")        
-    #     await self.start_telnet("sw1")
-    #     await self.start_telnet("sw2")
-    #     await self.start_telnet("sw3")
-    #     print("[Lab] Configuration loaded.")
-
     async def load_config(self):
         print("[Lab] Loading predefined configuration...")
 
@@ -225,6 +195,12 @@ class NetworkLabCLI:
         self.add_node("sw1")
         self.add_node("sw2")
         self.add_node("sw3")
+
+        # Step 4: Register all switches in every switch's graph
+        for sw in self.switches.values():
+            for other_name, other_sw in self.switches.items():
+                if sw.name != other_name:
+                    sw.graph.add_node(other_name, object=other_sw)       
 
         # Step 2: Link sw1:1 <--> sw2:1
         self.link("sw1", 1, "sw2", 1)
@@ -236,17 +212,30 @@ class NetworkLabCLI:
         sw3 = self.switches["sw3"]
 
         sw1.vlan_manager.create_vlan(1)
+        sw1.vlan_manager.assign_port(1, 1)  # Assign port 1 to VLAN 1
         sw1.create_vlan_interface(1, "10.1.1.1/24")
-        sw1.add_route("10.1.2.0/24","10.1.1.2")
+        # sw1.add_route("10.1.2.0/24","10.1.1.2")
 
         sw2.vlan_manager.create_vlan(1)
+        sw2.vlan_manager.assign_port(1, 1)  # sw2's port 1 <-> sw1
         sw2.create_vlan_interface(1, "10.1.1.2/24")
         sw2.vlan_manager.create_vlan(2)
+        sw2.vlan_manager.assign_port(2, 2)  # sw2's port 2 <-> sw3
         sw2.create_vlan_interface(2, "10.1.2.2/24")        
 
         sw3.vlan_manager.create_vlan(2)
+        sw3.vlan_manager.assign_port(2, 1)  # sw3's port 1 to VLAN 2
         sw3.create_vlan_interface(2, "10.1.2.3/24")        
-        sw3.add_route("10.1.1.0/24","10.1.2.2")
+        # sw3.add_route("10.1.1.0/24","10.1.2.2")
+
+        # Step 4: Inject neighbor object references for OSPF
+        for a, b in [("sw1", "sw2"), ("sw2", "sw3")]:
+            self.switches[a].graph.nodes[b]["object"] = self.switches[b]
+            self.switches[b].graph.nodes[a]["object"] = self.switches[a]
+
+        # Step 5: Run OSPF on each switch
+        for sw in self.switches.values():
+            sw.run_ospf()        
 
         await self.start_telnet("sw1")
         await self.start_telnet("sw2")

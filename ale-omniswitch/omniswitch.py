@@ -101,6 +101,8 @@ class OSPFEngine:
         self.reference_bw = reference_bw
         self.lsdb: Dict[str, Dict[str, int]] = {}
         self.routing_table: Dict[str, Tuple[str, int]] = {}
+        self.neighbors = {}
+        self.connected_subnets: set[str] = set()  # ✅ Add this line        
 
     def get_cost(self, bandwidth_mbps: int) -> int:
         return max(1, self.reference_bw // bandwidth_mbps if bandwidth_mbps else 65535)
@@ -108,17 +110,38 @@ class OSPFEngine:
     def update_lsdb(self, neighbors: Dict[str, int]):
         self.lsdb[self.switch_name] = neighbors
 
-    def calculate_routes(self):
+    def calculate_routes(self, current_switch: "OmniSwitch"):
         G = nx.Graph()
         for router, links in self.lsdb.items():
             for neighbor, cost in links.items():
                 G.add_edge(router, neighbor, weight=cost)
+
         if self.switch_name not in G:
             return
-        paths = nx.single_source_dijkstra_path_length(G, self.switch_name)
-        for dst, cost in paths.items():
-            if dst != self.switch_name:
-                self.routing_table[dst] = (dst, cost)
+
+        paths = nx.single_source_dijkstra_path(G, self.switch_name)
+        self.routing_table.clear()
+
+        for dst_router, path in paths.items():
+            if dst_router == self.switch_name:
+                continue
+
+            next_hop_router = path[1]
+
+            # Find IP of next-hop from current switch to that neighbor
+            next_hop_ip = current_switch._get_next_hop_ip_to(next_hop_router)
+            if not next_hop_ip:
+                print(f"[{self.switch_name}] Could not determine next hop IP to {next_hop_router}") 
+                continue
+
+            # Import that router's connected networks
+            neighbor_obj = current_switch.graph.nodes[dst_router]["object"]
+            for subnet in neighbor_obj.ospf.connected_subnets:
+                print(f"[{self.switch_name}] Adding OSPF route: {subnet} via {next_hop_ip}")
+                if subnet not in self.routing_table:
+                    self.routing_table[subnet] = (next_hop_ip, cost)
+                    print(f"[{self.switch_name}] Adding OSPF route: {subnet} via {next_hop_ip}")
+
 
     def get_ospf_routes(self) -> Dict[str, Tuple[str, int]]:
         return self.routing_table
@@ -127,7 +150,7 @@ class OSPFEngine:
         print(f"[OSPF Routing Table] for {self.switch_name}")
         print("{:<15} {:<10} {:<5}".format("Destination", "Next-Hop", "Cost"))
         for dst, (nexthop, cost) in self.routing_table.items():
-            print("{:<15} {:<10} {:<5}".format(dst, nexthop, cost))
+            print("{:<15} {:<10} {:<5}".format(dst, nexthop, cost)) 
 
 
 class OmniSwitch:
@@ -368,6 +391,128 @@ class OmniSwitch:
             for iface in self.l3_interfaces.values()
         )
 
+    # OSPF methods
+
+    def _get_next_hop_ip_to(self, neighbor_name: str) -> Optional[str]:
+        print(f"[{self.name}] Looking for next hop IP to {neighbor_name}")
+        print(f"[{self.name}] My L3 interfaces: {[f'{i.name} -> {i.ip_address} (VLAN={i.vlan}, Port={i.port_id})' for i in self.l3_interfaces.values()]}")
+
+        # Check port-based interfaces
+        for iface in self.l3_interfaces.values():
+            if iface.port_id is not None:
+                port = self.ports[iface.port_id]
+                if port.linked_node == neighbor_name:
+                    neighbor = self.graph.nodes[neighbor_name]["object"]
+                    for nbr_iface in neighbor.l3_interfaces.values():
+                        if nbr_iface.port_id is not None:
+                            nbr_port = neighbor.ports[nbr_iface.port_id]
+                            if nbr_port.linked_node == self.name:
+                                print(f"[{self.name}] Found next-hop IP {nbr_iface.ip_address} from {neighbor_name}")
+                                return str(ipaddress.ip_interface(nbr_iface.ip_address).ip)
+
+        # Check VLAN-based interfaces
+        for iface in self.l3_interfaces.values():
+            if iface.vlan is not None:
+                vlan = self.vlan_manager.vlans.get(iface.vlan)
+                print(f"[{self.name}] Checking VLAN {iface.vlan} for ports: {vlan.ports if vlan else 'None'}")
+                if vlan:
+                    for port_id in vlan.ports:
+                        port = self.ports.get(port_id)
+                        if port and port.linked_node == neighbor_name:
+                            neighbor = self.graph.nodes[neighbor_name]["object"]
+                            for nbr_iface in neighbor.l3_interfaces.values():
+                                if nbr_iface.vlan == iface.vlan:
+                                    print(f"[{self.name}] Found next-hop IP {nbr_iface.ip_address} from {neighbor_name} on VLAN {iface.vlan}")
+                                    return str(ipaddress.ip_interface(nbr_iface.ip_address).ip)
+
+        print(f"[{self.name}] Could not find next-hop IP to {neighbor_name}")
+        return None
+
+
+    
+    # def add_port(self, port_id, speed_mbps=100):
+    #     self.ports[port_id] = {'status': 'up', 'linked_node': None, 'speed': speed_mbps}
+
+    def connect_port(self, port_id, neighbor_name):
+        self.ports[port_id]['linked_node'] = neighbor_name
+        self.graph.add_edge(self.name, neighbor_name)
+
+    def exchange_ospf_lsa(self):
+        my_lsa = self.ospf.lsdb[self.name]  # cache this once
+        for port in self.ports.values():
+            if port.status == 'up' and port.linked_node:
+                neighbor = self.graph.nodes[port.linked_node]["object"]
+                neighbor.receive_lsa(self.name, my_lsa)
+
+    def receive_lsa(self, from_node: str, lsa: Dict[str, int]):
+        updated = False
+        if from_node not in self.ospf.lsdb or self.ospf.lsdb[from_node] != lsa:
+            print(f"[{self.name}] Received new LSA from {from_node}: {lsa}")
+            self.ospf.lsdb[from_node] = lsa
+            updated = True
+
+        if updated:
+            # Recalculate routes
+            self.ospf.calculate_routes(self)
+            self.redistribute_ospf_routes()
+
+            # Flood this new LSA to neighbors (except the sender)
+            for port in self.ports.values():
+                if port.status == "up" and port.linked_node and port.linked_node != from_node:
+                    neighbor = self.graph.nodes[port.linked_node]["object"]
+                    print(f"[{self.name}] Forwarding LSA of {from_node} to {port.linked_node}")
+                    neighbor.receive_lsa(from_node, lsa)
+
+    def redistribute_ospf_routes(self):
+        for dst, (nexthop_ip, route_type) in self.ospf.get_ospf_routes().items():
+            if dst not in self.routing_table:
+                print(f"[{self.name}] Installing OSPF route: {dst} → {nexthop_ip}")
+                self.routing_table[dst] = (nexthop_ip, "ospf")
+
+    def run_ospf(self):
+        print(f"[{self.name}] Starting OSPF process")
+
+        # Step 1: Build a map of OSPF neighbors with their link cost
+        neighbors = {}
+        for port_id, port in self.ports.items():
+            if port.status == 'up' and port.linked_node:
+                cost = self.ospf.get_cost(port.speed_mbps)
+                neighbors[port.linked_node] = cost
+                print(f"[{self.name}] Neighbor discovered: {port.linked_node} with cost {cost}")
+        
+        self.ospf.neighbors = neighbors  # ✅ Store neighbors
+
+        # Step 2: Gather directly connected subnets
+        self.ospf.connected_subnets = set()
+        for iface_name, iface in self.l3_interfaces.items():
+            try:
+                network = str(ipaddress.ip_interface(iface.ip_address).network)
+                self.ospf.connected_subnets.add(network)
+                print(f"[{self.name}] Connected subnet found: {network} (via {iface_name})")
+            except ValueError as e:
+                print(f"[{self.name}] Invalid IP on interface {iface_name}: {iface.ip_address} ({e})")
+
+        # Step 3: Update LSDB with this switch's neighbor map
+        print(f"[{self.name}] Updating LSDB with neighbors: {neighbors}")
+        self.ospf.update_lsdb(neighbors)
+
+        # Step 4: Exchange LSAs with neighbors
+        print(f"[{self.name}] Exchanging LSAs with neighbors...")
+        self.exchange_ospf_lsa()
+
+        # Step 5: Recalculate routes from updated LSDB
+        print(f"[{self.name}] Calculating OSPF routes from LSDB")
+        self.ospf.calculate_routes(self)
+
+        # Step 6: Install OSPF routes into main routing table
+        print(f"[{self.name}] Redistributing OSPF routes into routing table")
+        self.redistribute_ospf_routes()
+
+        print(f"[{self.name}] OSPF process completed\n")   
+
+    def show_ospf_routes(self):
+        self.ospf.show_routing_table()    
+
     # Class Methods
     def set_system_name(self, name: str): self.name = name
     def set_timezone(self, tz: str): self.timezone = tz
@@ -416,21 +561,6 @@ class OmniSwitch:
         network = ipaddress.ip_interface(ip_with_prefix).network
         self.routing_table[str(network)] = (f"Port{port_id}", "connected")
 
-    def run_ospf(self):
-        neighbors = {}
-        for port in self.ports.values():
-            if port.status == "up" and port.linked_node:
-                cost = self.ospf.get_cost(port.speed_mbps)
-                neighbors[port.linked_node] = cost
-        self.ospf.update_lsdb(neighbors)
-        self.ospf.calculate_routes()
-        self.redistribute_ospf_routes()
-
-    def redistribute_ospf_routes(self):
-        for dst, (nexthop, cost) in self.ospf.get_ospf_routes().items():
-            if dst not in self.routing_table:
-                self.routing_table[dst] = (nexthop, "ospf")
-
     def enable_mvrp_on_port(self, port_id: int):
         self.ports[port_id].mvrp_enabled = True
         self.mvrp_table[port_id] = set()
@@ -466,7 +596,7 @@ class OmniSwitch:
         writer.write("Destination        Next-Hop       Type\r\n")
         for destination, (next_hop, route_type) in self.routing_table.items():
             print(destination)
-            writer.write(f"{destination:<18} {next_hop:<14} {route_type}\r\n")  # ✅ GOOD
+            writer.write(f"{destination:<18} {next_hop:<14} {route_type}\r\n")  # ✅ GOOD            
 
     def show_l3_interfaces(self):
         print("Layer 3 Interfaces:")
@@ -495,6 +625,16 @@ class OmniSwitch:
 
     def show_ospf_routes(self):
         self.ospf.show_routing_table()
+
+    def show_ospf_neighbors(self):
+        print(f"[OSPF Neighbors] for {self.name}")
+        if not self.ospf.neighbors:
+            print("  No neighbors discovered.")
+            return
+
+        print("{:<10} {:<6}".format("Neighbor", "Cost"))
+        for neighbor, cost in self.ospf.neighbors.items():
+            print(f"{neighbor:<10} {cost:<6}")
 
     def send_packet(self, packet: Packet, ttl: int = 10, exclude_port: int = None):
         print(f"{self.name}: Sending packet to {packet.dst_ip} (exclude port={exclude_port})")

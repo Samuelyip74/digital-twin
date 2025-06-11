@@ -95,6 +95,9 @@ class OmniSwitchTelnetCLI:
                     self.switch.remove_route(cidr)
                 except:
                     writer.write("Usage: no ip static-route <CIDR>\r\n")   
+            elif command == "ip load ospf":
+                self.switch.run_ospf()
+                writer.write("OSPF started on {}\r\n".format(self.switch.name))                    
             elif command.startswith("ping "):
                 _, dst_ip = command.split(maxsplit=1)
                 self.switch.ping(dst_ip, writer)                 
@@ -122,6 +125,8 @@ class OmniSwitchTelnetCLI:
                 self.show_topology(writer)
             elif command == "show ospf routes":
                 self.show_ospf_routes(writer)
+            elif command == "show ip ospf neighbor":
+                self.switch.show_ospf_neighbors()                
             elif command == "help":
                 writer.write("Available commands:\r\n")
                 writer.write("  show vlan\r\n")
@@ -154,7 +159,7 @@ class OmniSwitchTelnetCLI:
         writer.write("Routing Table:\r\n")
         writer.write("Destination        Next-Hop       Type\r\n")
         for destination, (next_hop, route_type) in self.switch.routing_table.items():
-            writer.write(f"{destination:<18} {next_hop:<14} {route_type}\r\n")  # ✅ GOOD
+            writer.write(f"{destination:<18} {next_hop:<14} {route_type}\r\n")  # ✅ GOOD         
 
     def show_l3_interfaces(self, writer):
         writer.write("Layer 3 Interfaces:\r\n")
