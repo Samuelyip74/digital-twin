@@ -305,7 +305,7 @@ class OmniSwitch:
             payload={"type": "arp-request", "target_ip": target_ip}
         )
         for port in self.ports.values():
-            if port.status == "up" and port.linked_node and port.port_id != exclude_port:
+            if port.status == "up" and port.linked_node:
                 neighbor = self.graph.nodes[port.linked_node]["object"]
                 for nbr_port_id, nbr_port in neighbor.ports.items():
                     if nbr_port.linked_node == self.name:
@@ -696,7 +696,7 @@ class OmniSwitch:
         if dst_is_local:
             print(f"{self.name}: Packet for me ({packet.dst_ip}) - stopping here.")
             return True
-
+        print(f"{self.name}: Packet is not for me, forward it out except {in_port_id}")
         return self._forward(packet, ttl, in_port_id)
 
 
