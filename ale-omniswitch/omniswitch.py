@@ -131,16 +131,16 @@ class OSPFEngine:
             # Find IP of next-hop from current switch to that neighbor
             next_hop_ip = current_switch._get_next_hop_ip_to(next_hop_router)
             if not next_hop_ip:
-                print(f"[{self.switch_name}] Could not determine next hop IP to {next_hop_router}") 
+                # print(f"[{self.switch_name}] Could not determine next hop IP to {next_hop_router}") 
                 continue
 
             # Import that router's connected networks
             neighbor_obj = current_switch.graph.nodes[dst_router]["object"]
             for subnet in neighbor_obj.ospf.connected_subnets:
-                print(f"[{self.switch_name}] Adding OSPF route: {subnet} via {next_hop_ip}")
+                # print(f"[{self.switch_name}] Adding OSPF route: {subnet} via {next_hop_ip}")
                 if subnet not in self.routing_table:
                     self.routing_table[subnet] = (next_hop_ip, cost)
-                    print(f"[{self.switch_name}] Adding OSPF route: {subnet} via {next_hop_ip}")
+                    # print(f"[{self.switch_name}] Adding OSPF route: {subnet} via {next_hop_ip}")
 
 
     def get_ospf_routes(self) -> Dict[str, Tuple[str, int]]:
@@ -155,6 +155,7 @@ class OSPFEngine:
 
 class OmniSwitch:
     def __init__(self, name="OmniSwitch", timezone="UTC", system_contact="not-set"):
+        self.debug = False
         self.ping_reply_received = False  # Add this line
         self.arp_queue = defaultdict(deque)  # dst_ip -> deque of (packet, ttl, timestamp)
         self.arp_request_timestamps = {}     # dst_ip -> last_request_time        
@@ -181,12 +182,12 @@ class OmniSwitch:
         if not self._is_arp_request(packet) and not self._is_arp_reply(packet):
             return
 
-        print(f"{self.name}: _learn_arp called with in_port_id={in_port_id} for {packet.src_ip} → {packet.src_mac}")
+        self.debug and print(f"{self.name}: _learn_arp called with in_port_id={in_port_id} for {packet.src_ip} → {packet.src_mac}")
 
         self.arp_table[packet.src_ip] = (packet.src_mac, in_port_id)
         self.mac_table[packet.src_mac] = in_port_id
 
-        print(f"{self.name}: Learned ARP {packet.src_ip} → {packet.src_mac} on port {in_port_id}")
+        self.debug and print(f"{self.name}: Learned ARP {packet.src_ip} → {packet.src_mac} on port {in_port_id}")
 
 
     def _is_arp_request(self, packet: Packet) -> bool:
@@ -198,7 +199,7 @@ class OmniSwitch:
         # Step 1: Check if this switch owns the target IP
         for iface in self.l3_interfaces.values():
             if ipaddress.ip_interface(iface.ip_address).ip == ipaddress.ip_address(target_ip):
-                print(f"{self.name}: Replying to ARP request for {target_ip} for port {in_port_id}")
+                self.debug and print(f"{self.name}: Replying to ARP request for {target_ip} for port {in_port_id}")
 
                 # Build ARP reply
                 arp_reply = Packet(
@@ -216,13 +217,13 @@ class OmniSwitch:
         # Step 2: Flood the ARP request to all other ports
         for port in self.ports.values():
             if port.status == "up" and port.linked_node and port.port_id != in_port_id:
-                print(f"{self.name}: Port: {port.port_id}, Neighbor: {port.linked_node}")
+                self.debug and print(f"{self.name}: Port: {port.port_id}, Neighbor: {port.linked_node}")
                 neighbor = self.graph.nodes[port.linked_node]["object"]
 
                 # Find the reverse port (on neighbor) that links back to this switch
                 for nbr_port_id, nbr_port in neighbor.ports.items():
                     if nbr_port.linked_node == self.name:
-                        print(f"{self.name}: Flooding ARP request for {target_ip} to neighbor {neighbor.name} port {nbr_port_id}")
+                        self.debug and print(f"{self.name}: Flooding ARP request for {target_ip} to neighbor {neighbor.name} port {nbr_port_id}")
                         neighbor.receive_packet(packet, ttl - 1, in_port_id=nbr_port_id)
                         break  # only break inner loop, continue flooding other neighbors
 
@@ -237,7 +238,7 @@ class OmniSwitch:
     def _handle_arp_reply(self, packet: Packet, in_port_id: int):
         sender_ip = packet.src_ip
         sender_mac = packet.src_mac
-        print(f"{self.name}: Learned ARP from reply: {sender_ip} → {sender_mac} via port {in_port_id}")
+        self.debug and print(f"{self.name}: Learned ARP from reply: {sender_ip} → {sender_mac} via port {in_port_id}")
 
         self.arp_table[sender_ip] = (sender_mac, in_port_id)
         self.mac_table[sender_mac] = in_port_id
@@ -247,14 +248,14 @@ class OmniSwitch:
             queued = list(self.arp_queue.pop(sender_ip))
             for queued_packet, queued_ttl, timestamp in queued:
                 if time.time() - timestamp <= 5:
-                    print(f"{self.name}: Sending queued packet to {sender_ip}")
+                    self.debug and print(f"{self.name}: Sending queued packet to {sender_ip}")
                     self._handle_connected_route(queued_packet, queued_ttl)
                 else:
-                    print(f"{self.name}: Dropped expired queued packet to {sender_ip}")
+                    self.debug and print(f"{self.name}: Dropped expired queued packet to {sender_ip}")
 
 
     def _is_local_destination(self, dst_ip: str) -> bool:
-        print(f"dst_ip is {dst_ip}")
+        self.debug and print(f"dst_ip is {dst_ip}")
         for iface in self.l3_interfaces.values():
             if ipaddress.ip_address(dst_ip) == ipaddress.ip_interface(iface.ip_address).ip:
                 return True
@@ -287,7 +288,7 @@ class OmniSwitch:
     def _forward(self, packet: Packet, ttl: int, exclude_port: int = None) -> bool:
         forwarded = self.send_packet(packet, ttl - 1, exclude_port=exclude_port)
         if not forwarded:
-            print(f"{self.name}: Packet could not be forwarded.")
+            self.debug and print(f"{self.name}: Packet could not be forwarded.")
         return forwarded
             
     def _lookup_route(self, dst_ip: str):
@@ -310,7 +311,7 @@ class OmniSwitch:
                 for nbr_port_id, nbr_port in neighbor.ports.items():
                     if nbr_port.linked_node == self.name:
                         neighbor.receive_packet(arp_request, ttl - 1, in_port_id=nbr_port_id)
-                        print(f"{self.name}: Send packet from Port {port.port_id} to {port.linked_node}, incoming port {nbr_port_id}.")
+                        self.debug and print(f"{self.name}: Send packet from Port {port.port_id} to {port.linked_node}, incoming port {nbr_port_id}.")
 
     def _valid_port(self, port_id: int) -> Optional[Tuple['Port', 'OmniSwitch']]:
         port = self.ports.get(port_id)
@@ -328,7 +329,7 @@ class OmniSwitch:
         if dst_ip not in self.arp_table:
             last_sent = self.arp_request_timestamps.get(dst_ip)
             if not last_sent or current_time - last_sent > 1:
-                print(f"{self.name}: Sending ARP request for {dst_ip}")
+                self.debug and print(f"{self.name}: Sending ARP request for {dst_ip}")
                 self._send_arp_request(dst_ip, packet.src_ip, packet.src_mac, ttl, exclude_port)
                 self.arp_request_timestamps[dst_ip] = current_time
 
@@ -339,19 +340,19 @@ class OmniSwitch:
         dst_mac, port_id = self.arp_table[dst_ip]
         port_info = self._valid_port(port_id)
         if not port_info:
-            print(f"{self.name}: Invalid port {port_id} for {dst_ip}")
+            self.debug and print(f"{self.name}: Invalid port {port_id} for {dst_ip}")
             return False
 
         port, neighbor = port_info
         packet.dst_mac = dst_mac
-        print(f"{self.name}: Forwarding packet to {dst_ip} via port {port.port_id}")
+        self.debug and print(f"{self.name}: Forwarding packet to {dst_ip} via port {port.port_id}")
 
         # Step 3: Find neighbor's port that links back to this switch
         for nbr_port_id, nbr_port in neighbor.ports.items():
             if nbr_port.linked_node == self.name:
                 return neighbor.receive_packet(packet, ttl - 1, in_port_id=nbr_port_id)
 
-        print(f"{self.name}: Could not find reverse port on {neighbor.name} for {dst_ip}")
+        self.debug and print(f"{self.name}: Could not find reverse port on {neighbor.name} for {dst_ip}")
         return False
 
 
@@ -364,7 +365,7 @@ class OmniSwitch:
             # Step 2: Send ARP request if not recently sent
             last_sent = self.arp_request_timestamps.get(next_hop)
             if not last_sent or current_time - last_sent > 1:
-                print(f"{self.name}: Sending ARP request for next hop {next_hop}")
+                self.debug and print(f"{self.name}: Sending ARP request for next hop {next_hop}")
                 self._send_arp_request(next_hop, packet.src_ip, packet.src_mac, ttl, exclude_port)
                 self.arp_request_timestamps[next_hop] = current_time
 
@@ -376,12 +377,12 @@ class OmniSwitch:
         next_mac, port_id = self.arp_table[next_hop]
         port_info = self._valid_port(port_id)
         if not port_info:
-            print(f"{self.name}: Invalid port {port_id} for next hop {next_hop}")
+            self.debug and print(f"{self.name}: Invalid port {port_id} for next hop {next_hop}")
             return False
 
         port, neighbor = port_info
         packet.dst_mac = next_mac
-        print(f"{self.name}: Forwarding packet to {packet.dst_ip} via next hop {next_hop} on port {port.port_id}")
+        self.debug and print(f"{self.name}: Forwarding packet to {packet.dst_ip} via next hop {next_hop} on port {port.port_id}")
         return neighbor.receive_packet(packet, ttl - 1, in_port_id=port.port_id)
 
 
@@ -394,8 +395,8 @@ class OmniSwitch:
     # OSPF methods
 
     def _get_next_hop_ip_to(self, neighbor_name: str) -> Optional[str]:
-        print(f"[{self.name}] Looking for next hop IP to {neighbor_name}")
-        print(f"[{self.name}] My L3 interfaces: {[f'{i.name} -> {i.ip_address} (VLAN={i.vlan}, Port={i.port_id})' for i in self.l3_interfaces.values()]}")
+        self.debug and print(f"[{self.name}] Looking for next hop IP to {neighbor_name}")
+        self.debug and print(f"[{self.name}] My L3 interfaces: {[f'{i.name} -> {i.ip_address} (VLAN={i.vlan}, Port={i.port_id})' for i in self.l3_interfaces.values()]}")
 
         # Check port-based interfaces
         for iface in self.l3_interfaces.values():
@@ -407,14 +408,14 @@ class OmniSwitch:
                         if nbr_iface.port_id is not None:
                             nbr_port = neighbor.ports[nbr_iface.port_id]
                             if nbr_port.linked_node == self.name:
-                                print(f"[{self.name}] Found next-hop IP {nbr_iface.ip_address} from {neighbor_name}")
+                                # print(f"[{self.name}] Found next-hop IP {nbr_iface.ip_address} from {neighbor_name}")
                                 return str(ipaddress.ip_interface(nbr_iface.ip_address).ip)
 
         # Check VLAN-based interfaces
         for iface in self.l3_interfaces.values():
             if iface.vlan is not None:
                 vlan = self.vlan_manager.vlans.get(iface.vlan)
-                print(f"[{self.name}] Checking VLAN {iface.vlan} for ports: {vlan.ports if vlan else 'None'}")
+                self.debug and print(f"[{self.name}] Checking VLAN {iface.vlan} for ports: {vlan.ports if vlan else 'None'}")
                 if vlan:
                     for port_id in vlan.ports:
                         port = self.ports.get(port_id)
@@ -422,16 +423,11 @@ class OmniSwitch:
                             neighbor = self.graph.nodes[neighbor_name]["object"]
                             for nbr_iface in neighbor.l3_interfaces.values():
                                 if nbr_iface.vlan == iface.vlan:
-                                    print(f"[{self.name}] Found next-hop IP {nbr_iface.ip_address} from {neighbor_name} on VLAN {iface.vlan}")
+                                    # print(f"[{self.name}] Found next-hop IP {nbr_iface.ip_address} from {neighbor_name} on VLAN {iface.vlan}")
                                     return str(ipaddress.ip_interface(nbr_iface.ip_address).ip)
 
-        print(f"[{self.name}] Could not find next-hop IP to {neighbor_name}")
+        self.debug and print(f"[{self.name}] Could not find next-hop IP to {neighbor_name}")
         return None
-
-
-    
-    # def add_port(self, port_id, speed_mbps=100):
-    #     self.ports[port_id] = {'status': 'up', 'linked_node': None, 'speed': speed_mbps}
 
     def connect_port(self, port_id, neighbor_name):
         self.ports[port_id]['linked_node'] = neighbor_name
@@ -447,7 +443,7 @@ class OmniSwitch:
     def receive_lsa(self, from_node: str, lsa: Dict[str, int]):
         updated = False
         if from_node not in self.ospf.lsdb or self.ospf.lsdb[from_node] != lsa:
-            print(f"[{self.name}] Received new LSA from {from_node}: {lsa}")
+            self.debug and print(f"[{self.name}] Received new LSA from {from_node}: {lsa}")
             self.ospf.lsdb[from_node] = lsa
             updated = True
 
@@ -460,17 +456,17 @@ class OmniSwitch:
             for port in self.ports.values():
                 if port.status == "up" and port.linked_node and port.linked_node != from_node:
                     neighbor = self.graph.nodes[port.linked_node]["object"]
-                    print(f"[{self.name}] Forwarding LSA of {from_node} to {port.linked_node}")
+                    self.debug and print(f"[{self.name}] Forwarding LSA of {from_node} to {port.linked_node}")
                     neighbor.receive_lsa(from_node, lsa)
 
     def redistribute_ospf_routes(self):
         for dst, (nexthop_ip, route_type) in self.ospf.get_ospf_routes().items():
             if dst not in self.routing_table:
-                print(f"[{self.name}] Installing OSPF route: {dst} → {nexthop_ip}")
+                self.debug and print(f"[{self.name}] Installing OSPF route: {dst} → {nexthop_ip}")
                 self.routing_table[dst] = (nexthop_ip, "ospf")
 
     def run_ospf(self):
-        print(f"[{self.name}] Starting OSPF process")
+        self.debug and print(f"[{self.name}] Starting OSPF process")
 
         # Step 1: Build a map of OSPF neighbors with their link cost
         neighbors = {}
@@ -478,7 +474,7 @@ class OmniSwitch:
             if port.status == 'up' and port.linked_node:
                 cost = self.ospf.get_cost(port.speed_mbps)
                 neighbors[port.linked_node] = cost
-                print(f"[{self.name}] Neighbor discovered: {port.linked_node} with cost {cost}")
+                self.debug and print(f"[{self.name}] Neighbor discovered: {port.linked_node} with cost {cost}")
         
         self.ospf.neighbors = neighbors  # ✅ Store neighbors
 
@@ -488,27 +484,27 @@ class OmniSwitch:
             try:
                 network = str(ipaddress.ip_interface(iface.ip_address).network)
                 self.ospf.connected_subnets.add(network)
-                print(f"[{self.name}] Connected subnet found: {network} (via {iface_name})")
+                self.debug and print(f"[{self.name}] Connected subnet found: {network} (via {iface_name})")
             except ValueError as e:
-                print(f"[{self.name}] Invalid IP on interface {iface_name}: {iface.ip_address} ({e})")
+                self.debug and print(f"[{self.name}] Invalid IP on interface {iface_name}: {iface.ip_address} ({e})")
 
         # Step 3: Update LSDB with this switch's neighbor map
-        print(f"[{self.name}] Updating LSDB with neighbors: {neighbors}")
+        self.debug and print(f"[{self.name}] Updating LSDB with neighbors: {neighbors}")
         self.ospf.update_lsdb(neighbors)
 
         # Step 4: Exchange LSAs with neighbors
-        print(f"[{self.name}] Exchanging LSAs with neighbors...")
+        self.debug and print(f"[{self.name}] Exchanging LSAs with neighbors...")
         self.exchange_ospf_lsa()
 
         # Step 5: Recalculate routes from updated LSDB
-        print(f"[{self.name}] Calculating OSPF routes from LSDB")
+        self.debug and print(f"[{self.name}] Calculating OSPF routes from LSDB")
         self.ospf.calculate_routes(self)
 
         # Step 6: Install OSPF routes into main routing table
-        print(f"[{self.name}] Redistributing OSPF routes into routing table")
+        self.debug and print(f"[{self.name}] Redistributing OSPF routes into routing table")
         self.redistribute_ospf_routes()
 
-        print(f"[{self.name}] OSPF process completed\n")   
+        self.debug and print(f"[{self.name}] OSPF process completed\n")   
 
     def show_ospf_routes(self):
         self.ospf.show_routing_table()    
@@ -530,9 +526,9 @@ class OmniSwitch:
     def remove_route(self, ip_cidr: str):
         if ip_cidr in self.routing_table:
             del self.routing_table[ip_cidr]
-            print(f"Route {ip_cidr} removed.")
+            self.debug and print(f"Route {ip_cidr} removed.")
         else:
-            print(f"Route {ip_cidr} not found.")
+            self.debug and print(f"Route {ip_cidr} not found.")
 
     def create_vlan_interface(self, vlan_id: int, ip_with_prefix: str):
         if vlan_id not in self.vlan_manager.vlans:
@@ -637,20 +633,20 @@ class OmniSwitch:
             print(f"{neighbor:<10} {cost:<6}")
 
     def send_packet(self, packet: Packet, ttl: int = 10, exclude_port: int = None):
-        print(f"{self.name}: Sending packet to {packet.dst_ip} (exclude port={exclude_port})")
+        self.debug and print(f"{self.name}: Sending packet to {packet.dst_ip} (exclude port={exclude_port})")
 
         # Step 1: Check TTL
         if ttl <= 0:
-            print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
+            self.debug and print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
             return False
 
         # Step 2: Route Lookup
         next_hop, route_type = self._lookup_route(packet.dst_ip)
         if not next_hop:
-            print(f"{self.name}: No route to {packet.dst_ip}")
+            self.debug and print(f"{self.name}: No route to {packet.dst_ip}")
             return False
 
-        print(f"{self.name}: Found next hop {next_hop} via {route_type} route")
+        self.debug and print(f"{self.name}: Found next hop {next_hop} via {route_type} route")
 
         # Step 3: Forward Based on Route Type
         if route_type == "connected":
@@ -658,15 +654,15 @@ class OmniSwitch:
         elif route_type in ("static", "ospf"):
             return self._handle_indirect_route(packet, next_hop, ttl, exclude_port)
         else:
-            print(f"{self.name}: Unsupported route type {route_type}")
+            self.debug and print(f"{self.name}: Unsupported route type {route_type}")
             return False
 
     
     def receive_packet(self, packet: Packet, ttl: int, in_port_id: int = None):
-        print(f"{self.name}: receive_packet called for {packet.dst_ip} (from {packet.src_ip}) on port {in_port_id}")        
+        self.debug and print(f"{self.name}: receive_packet called for {packet.dst_ip} (from {packet.src_ip}) on port {in_port_id}")        
 
         if ttl <= 1:
-            print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
+            self.debug and print(f"{self.name}: TTL expired for packet to {packet.dst_ip}")
             return False
 
         self._learn_arp(packet, in_port_id)
@@ -694,9 +690,9 @@ class OmniSwitch:
 
         # Catch-all for traffic to local
         if dst_is_local:
-            print(f"{self.name}: Packet for me ({packet.dst_ip}) - stopping here.")
+            self.debug and print(f"{self.name}: Packet for me ({packet.dst_ip}) - stopping here.")
             return True
-        print(f"{self.name}: Packet is not for me, forward it out except {in_port_id}")
+        self.debug and print(f"{self.name}: Packet is not for me, forward it out except {in_port_id}")
         return self._forward(packet, ttl, in_port_id)
 
 

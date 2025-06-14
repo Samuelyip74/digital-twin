@@ -14,7 +14,7 @@ class NetworkLabCLI:
         self.switches: Dict[str, OmniSwitch] = {}
         self.telnet_ports = {}
         self.telnet_tasks = {}  
-        self.base_port = 9000
+        self.base_port = 9001
 
     def add_node(self, name: str):
         if name in self.switches:
@@ -22,7 +22,7 @@ class NetworkLabCLI:
         else:
             sw = OmniSwitch(name)
             self.switches[name] = sw
-            print(f"Added switch node: {name}")
+            # print(f"Added switch node: {name}")
 
     def link(self, sw1: str, port1: int, sw2: str, port2: int):
         if sw1 not in self.switches or sw2 not in self.switches:
@@ -37,7 +37,7 @@ class NetworkLabCLI:
         # Add neighbor nodes to each other's graph with reference
         s1.graph.add_node(sw2, object=s2)
         s2.graph.add_node(sw1, object=s1)        
-        print(f"Linked {sw1}:{port1} <--> {sw2}:{port2}")
+        # print(f"Linked {sw1}:{port1} <--> {sw2}:{port2}")
 
     async def start_telnet(self, node: str):
         if node not in self.switches:
@@ -45,7 +45,7 @@ class NetworkLabCLI:
             return
 
         if node in self.telnet_ports:
-            print(f"Telnet already running on {node} (port {self.telnet_ports[node]})")
+            # print(f"Telnet already running on {node} (port {self.telnet_ports[node]})")
             return
 
         port = self.base_port + len(self.telnet_ports)
@@ -63,10 +63,10 @@ class NetworkLabCLI:
                 shell=telnet_shell,
                 encoding='utf8'
             )
-            print(f"[Telnet] Listening on port {port} for {node}")
+            # print(f"[Telnet] Listening on port {port} for {node}")
             await server.serve_forever()
 
-        print(f"Launching Telnet server for {node} on port {port}...")
+        print(f"- Starting Telnet server for {node} on port {port}...")
         asyncio.create_task(launch_telnet())    
 
     def list_nodes(self):
@@ -141,10 +141,14 @@ class NetworkLabCLI:
 
 
     async def run(self):
-        print("Welcome to Network Lab CLI. Type 'help' for commands.")
+        welcome_msg = """
+\n\nWelcome to Alcatel-Lucent Enterprise - Digital Twin Engine CLI. 
+Type 'help' for commands.\n
+"""
+        print(welcome_msg)
         while True:
             try:
-                cmd = await asyncio.to_thread(input, "lab> ")
+                cmd = await asyncio.to_thread(input, "DT_Lab> ")
             except (EOFError, KeyboardInterrupt):
                 break
 
@@ -192,9 +196,8 @@ class NetworkLabCLI:
 
 
     async def load_config(self):
-        print("[Lab] Loading predefined configuration...")
-
-        # Step 1: Add nodes
+        
+        # # Step 1: Add nodes
         self.add_node("sw1")
         self.add_node("sw2")
         self.add_node("sw3")
@@ -205,42 +208,27 @@ class NetworkLabCLI:
                 if sw.name != other_name:
                     sw.graph.add_node(other_name, object=other_sw)       
 
-        # Step 2: Link sw1:1 <--> sw2:1
+        # # Step 2: Link sw1:1 <--> sw2:1
         self.link("sw1", 1, "sw2", 1)
         self.link("sw2", 2, "sw3", 1)
 
-        # Step 3: Apply VLAN and IP config
+        # # Step 3: Apply VLAN and IP config
         sw1 = self.switches["sw1"]
         sw2 = self.switches["sw2"]
         sw3 = self.switches["sw3"]
-
-        sw1.vlan_manager.create_vlan(1)
-        sw1.vlan_manager.assign_port(1, 1)  # Assign port 1 to VLAN 1
-        sw1.create_vlan_interface(1, "10.1.1.1/24")
-        # sw1.add_route("10.1.2.0/24","10.1.1.2")
-
-        sw2.vlan_manager.create_vlan(1)
-        sw2.vlan_manager.assign_port(1, 1)  # sw2's port 1 <-> sw1
-        sw2.create_vlan_interface(1, "10.1.1.2/24")
-        sw2.vlan_manager.create_vlan(2)
-        sw2.vlan_manager.assign_port(2, 2)  # sw2's port 2 <-> sw3
-        sw2.create_vlan_interface(2, "10.1.2.2/24")        
-
-        sw3.vlan_manager.create_vlan(2)
-        sw3.vlan_manager.assign_port(2, 1)  # sw3's port 1 to VLAN 2
-        sw3.create_vlan_interface(2, "10.1.2.3/24")        
-        # sw3.add_route("10.1.1.0/24","10.1.2.2")
 
         # Step 4: Inject neighbor object references for OSPF
         for a, b in [("sw1", "sw2"), ("sw2", "sw3")]:
             self.switches[a].graph.nodes[b]["object"] = self.switches[b]
             self.switches[b].graph.nodes[a]["object"] = self.switches[a]
 
-        # Step 5: Run OSPF on each switch
-        for sw in self.switches.values():
-            sw.run_ospf()        
+        # # Step 5: Run OSPF on each switch
+        # for sw in self.switches.values():
+        #     sw.run_ospf()        
 
+        
         await self.start_telnet("sw1")
         await self.start_telnet("sw2")
         await self.start_telnet("sw3")
-        print("[Lab] Configuration loaded.")    
+
+        # print("[Lab] Configuration loaded.")    

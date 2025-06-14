@@ -47,6 +47,19 @@ class OmniSwitchTelnetCLI:
             elif command.startswith("set contact "):
                 self.switch.set_system_contact(command.replace("set contact ", "", 1).strip())
                 writer.write("System contact updated.\r\n")  
+            elif re.match(r"vlan\s+\d+\s+member\s+port\s+\d+", command, re.IGNORECASE):
+                try:
+                    match = re.match(r"vlan\s+(\d+)\s+member\s+port\s+(\d+)", command.strip(), re.IGNORECASE)
+                    vlan_id = int(match.group(1))
+                    port_id = int(match.group(2))
+                    
+                    if vlan_id not in self.switch.vlan_manager.vlans:
+                        writer.write(f"VLAN {vlan_id} does not exist.\r\n")
+                    else:
+                        self.switch.vlan_manager.assign_port(vlan_id, port_id)
+                        writer.write(f"Port {port_id} added to VLAN {vlan_id}.\r\n")
+                except Exception as e:
+                    writer.write(f"Failed to assign port: {e}\r\n")                    
             elif command.startswith("vlan "):
                 vlan_ids, name = parse_vlan_command(command)
                 for vlan_id in vlan_ids:
@@ -65,7 +78,7 @@ class OmniSwitchTelnetCLI:
                         self.switch.vlan_manager.delete_vlan(vlan_id)
                     writer.write("VLAN(s) removed.\r\n")
                 else:
-                    writer.write("Invalid VLAN input.\r\n")    
+                    writer.write("Invalid VLAN input.\r\n")                                       
             elif command.startswith("ip interface vlan"):
                 # Parse: ip interface vlan1 address 10.1.1.1 mask 255.255.255.0 vlan 1
                 try:
